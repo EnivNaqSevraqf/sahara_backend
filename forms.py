@@ -296,7 +296,8 @@ def store_form_response(response_data: FormResponse) -> Dict[str, Any]:
     """
     try:
         # Check if form exists and deadline hasn't passed
-        form = forms_collection.find_one({"_id": response_data.form_id})
+        
+        form = forms_collection.find_one({"_id": ObjectId(response_data.form_id)})
         
         if not form:
             raise HTTPException(status_code=404, detail="Form not found")
@@ -314,14 +315,14 @@ def store_form_response(response_data: FormResponse) -> Dict[str, Any]:
         if existing_response:
             # Update existing response
             result = forms_collection.update_one(
-                {"_id": response_data.form_id, "responses.user_id": response_data.user_id},
+                {"_id": ObjectId(response_data.form_id), "responses.user_id": response_data.user_id},
                 {"$set": {"responses.$.response_data": response_data.response_data}}
             )
             message = "Response updated successfully"
         else:
             # Add new response
             result = forms_collection.update_one(
-                {"_id": response_data.form_id},
+                {"_id": ObjectId(response_data.form_id)},
                 {"$push": {"responses": {
                     "user_id": response_data.user_id,
                     "response_data": response_data.response_data,
@@ -329,6 +330,7 @@ def store_form_response(response_data: FormResponse) -> Dict[str, Any]:
                 }}}
             )
             message = "Response submitted successfully"
+            print("Submitted response successfully")
         
         return {
             "message": message,
@@ -409,9 +411,32 @@ def is_deadline_passed(deadline: str) -> bool:
         # If there's any error parsing, default to assuming deadline has passed
         raise ValueError(f"Invalid deadline format: {str(e)}")
 
-def get_all_forms() -> List[Dict[str, Any]]:
+def check_deadline_passed(deadline: str):
+    """
+    Check if a form's deadline has passed
+    
+    Parameters:
+    - deadline: ISO 8601 formatted deadline string
+    
+    Returns:
+    - True if deadline has passed, False otherwise
+    """
+    try:
+        # Parse deadline into datetime object
+        deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+        # Compare with current time
+        return datetime.now(deadline_dt.tzinfo) > deadline_dt
+    except Exception as e:
+        # If there's any error parsing, default to assuming deadline has passed
+        raise ValueError(f"Invalid deadline format: {str(e)}")
+
+
+def get_all_forms(user_id: Optional[str] = None) -> List[Dict[str, Any]]: 
     """
     Get all forms in the database
+    
+    Parameters:
+    - user_id: Optional user ID to check if the user has submitted the form
     
     Returns:
     - List of form documents with data relevant for listing
@@ -421,7 +446,14 @@ def get_all_forms() -> List[Dict[str, Any]]:
         for i in forms:
             i["_id"] = str(i["_id"])
             i["score"] = "-/-"
-            i["attempt"] = True
+            i["deadline_passed"] = is_deadline_passed(i["deadline"])
+            if user_id:
+                i["attempt"] = (not any(response.get("user_id") == user_id for response in i.get("responses", [])))
+                # i["attempt"] = not any(response.get("user_id") == user_id for response in i.get("responses", []))
+            # else:
+                # i["attempt"] = any(response.get("user_id") for response in i.get("responses", []))
+            else:
+                i["attempt"] = False
             del i["form_json"]
             del i["responses"]
         return forms
@@ -435,9 +467,8 @@ async def api_create_form(form_data: FormCreate):
     print(result)
     return JSONResponse(status_code=201, content=result)
 
-@app.post("/api/forms/{form_id}/submit")
-async def api_submit_response(form_id: str, response: Dict[str, Any], user_id: str = Depends(resolveUserToken)):
-    form_response = FormResponse(form_id=form_id, user_id=user_id, response_data=response)
+@app.post("/api/forms/submit")
+async def api_submit_response(form_response: FormResponse):
     result = store_form_response(form_response)
     return JSONResponse(status_code=201, content=result)
 
@@ -462,8 +493,10 @@ async def api_check_deadline(form_id: str):
     )
 
 
+class User(BaseModel):
+    user_id: str
 
-@app.get("/api/get_forms")
-async def api_get_forms():
-    forms = get_all_forms()
+@app.post("/api/get_forms")
+async def api_get_forms(user: User):
+    forms = get_all_forms(user.user_id)
     return JSONResponse(status_code=200, content=forms)
