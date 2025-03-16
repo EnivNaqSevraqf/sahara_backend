@@ -1,0 +1,27 @@
+{
+    "_id": {
+        "type": "number",
+        "required": true
+    },
+    "form_name": {
+        "type": "string",
+        "required": true
+    },
+    "form_json": {
+        "type": "object",
+        "required": true
+    },
+    "created_at": {
+        "type": "string",
+        "required": true
+    },
+    "deadline": {
+        "type": "string",
+        "required": true
+    },
+    "responses": [
+        {
+            "user_id" : "user_respone"
+        }
+    ]
+}
