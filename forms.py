@@ -1,13 +1,14 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from datetime import datetime
+from datetime import datetime, timezone
 import json
-from typing import Optional
+from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, validator
 import os
 from pymongo import MongoClient
 from bson.json_util import dumps, loads
+from bson.objectid import ObjectId
 
 
 def resolveUserToken(token):
@@ -69,12 +70,13 @@ app.add_middleware(
 mongo_client = MongoClient('mongodb://localhost:27017/')
 db = mongo_client['surveyData']
 survey_collection = db['surveyResults']
+forms_collection = db['forms']  # Add this collection for forms
 
 async def get_timestamp_request(timestamp: str = Form(...)) -> TimestampRequest:
     return TimestampRequest(timestamp=timestamp)
 
 @app.post("/createForm")
-async def create_form(
+async def create_form_old(
     file: UploadFile = File(...),
     timestamp_request: TimestampRequest = Depends(get_timestamp_request)
 ):
@@ -224,4 +226,244 @@ async def test_endpoint(request_data: Request):
         }
     )
 
+class FormCreate(BaseModel):
+    form_name: str
+    form_json: Dict[str, Any]
+    deadline: str
+    
+    @validator('deadline')
+    def validate_deadline(cls, v):
+        try:
+            # Validate ISO 8601 format
+            datetime.fromisoformat(v.replace('Z', '+00:00'))
+            return v
+        except ValueError:
+            raise ValueError("Invalid deadline format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
 
+class FormResponse(BaseModel):
+    form_id: str
+    user_id: str
+    response_data: Dict[str, Any]
+
+def create_form(form_data: FormCreate) -> Dict[str, Any]:
+    """
+    Create a new form in the database
+    
+    Parameters:
+    - form_data: FormCreate object with form name, JSON structure, and deadline
+    
+    Returns:
+    - Dictionary with form details including the generated ID
+    """
+    try:
+        # Create form document
+        form_doc = {
+            "form_name": form_data.form_name,
+            "form_json": form_data.form_json,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "deadline": form_data.deadline,
+            "responses": []
+        }
+        
+        # Insert into MongoDB
+        result = forms_collection.insert_one(form_doc)
+        form_id = str(result.inserted_id)
+        
+        # # Update the document with the string ID
+        # forms_collection.update_one(
+        #     {"_id": result.inserted_id},
+        #     {"$set": {"_id": form_id}}
+        # )
+        
+        return {
+            "_id": form_id,
+            "form_name": form_data.form_name,
+            "created_at": form_doc["created_at"],
+            "deadline": form_data.deadline
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating form: {str(e)}")
+
+def store_form_response(response_data: FormResponse) -> Dict[str, Any]:
+    """
+    Store a user's response to a form
+    
+    Parameters:
+    - response_data: FormResponse object with form_id, user_id and response data
+    
+    Returns:
+    - Dictionary with operation result
+    """
+    try:
+        # Check if form exists and deadline hasn't passed
+        form = forms_collection.find_one({"_id": response_data.form_id})
+        
+        if not form:
+            raise HTTPException(status_code=404, detail="Form not found")
+        
+        # Check deadline
+        if is_deadline_passed(form["deadline"]):
+            raise HTTPException(status_code=400, detail="Form submission deadline has passed")
+        
+        # Check if user has already responded
+        existing_response = next(
+            (resp for resp in form.get("responses", []) if resp.get("user_id") == response_data.user_id), 
+            None
+        )
+        
+        if existing_response:
+            # Update existing response
+            result = forms_collection.update_one(
+                {"_id": response_data.form_id, "responses.user_id": response_data.user_id},
+                {"$set": {"responses.$.response_data": response_data.response_data}}
+            )
+            message = "Response updated successfully"
+        else:
+            # Add new response
+            result = forms_collection.update_one(
+                {"_id": response_data.form_id},
+                {"$push": {"responses": {
+                    "user_id": response_data.user_id,
+                    "response_data": response_data.response_data,
+                    "submitted_at": datetime.utcnow().isoformat()
+                }}}
+            )
+            message = "Response submitted successfully"
+        
+        return {
+            "message": message,
+            "form_id": response_data.form_id,
+            "user_id": response_data.user_id
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error storing form response: {str(e)}")
+
+def get_form_by_id(form_id: str) -> Dict[str, Any]:
+    """
+    Retrieve a form by its ID
+    
+    Parameters:
+    - form_id: The ID of the form to retrieve
+    
+    Returns:
+    - Dictionary with form details
+    """
+    print("Form ID I recieved:", form_id)
+    try:
+        form = forms_collection.find_one({"_id": ObjectId(form_id)})
+        if not form:
+            raise HTTPException(status_code=404, detail="Form not found")
+        return form
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving form: {str(e)}")
+
+def get_user_response(form_id: str, user_id: str) -> Dict[str, Any]:
+    """
+    Get a specific user's response to a form
+    
+    Parameters:
+    - form_id: ID of the form
+    - user_id: ID of the user
+    
+    Returns:
+    - Dictionary with user's response data or None if not found
+    """
+    try:
+        form = forms_collection.find_one({"_id": form_id})
+        if not form:
+            raise HTTPException(status_code=404, detail="Form not found")
+        
+        user_response = next(
+            (resp for resp in form.get("responses", []) if resp.get("user_id") == user_id),
+            None
+        )
+        
+        return {
+            "found": user_response is not None,
+            "form_id": form_id,
+            "user_id": user_id,
+            "response_data": user_response["response_data"] if user_response else None,
+            "submitted_at": user_response["submitted_at"] if user_response else None
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving user response: {str(e)}")
+
+def is_deadline_passed(deadline: str) -> bool:
+    """
+    Check if a form's deadline has passed
+    
+    Parameters:
+    - deadline: ISO 8601 formatted deadline string
+    
+    Returns:
+    - True if deadline has passed, False otherwise
+    """
+    try:
+        # Parse deadline into datetime object
+        deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+        # Compare with current time
+        return datetime.now(deadline_dt.tzinfo) > deadline_dt
+    except Exception as e:
+        # If there's any error parsing, default to assuming deadline has passed
+        raise ValueError(f"Invalid deadline format: {str(e)}")
+
+def get_all_forms() -> List[Dict[str, Any]]:
+    """
+    Get all forms in the database
+    
+    Returns:
+    - List of form documents with data relevant for listing
+    """
+    try:
+        forms = list(forms_collection.find({}))
+        for i in forms:
+            i["_id"] = str(i["_id"])
+            i["score"] = "-/-"
+            i["attempt"] = True
+            del i["form_json"]
+            del i["responses"]
+        return forms
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error retrieving forms: {str(e)}")
+
+# Example route implementations using these functions
+@app.post("/api/forms/create")
+async def api_create_form(form_data: FormCreate):
+    result = create_form(form_data)
+    print(result)
+    return JSONResponse(status_code=201, content=result)
+
+@app.post("/api/forms/{form_id}/submit")
+async def api_submit_response(form_id: str, response: Dict[str, Any], user_id: str = Depends(resolveUserToken)):
+    form_response = FormResponse(form_id=form_id, user_id=user_id, response_data=response)
+    result = store_form_response(form_response)
+    return JSONResponse(status_code=201, content=result)
+
+@app.get("/api/forms/{form_id}")
+async def api_get_form(form_id: str):
+    form = get_form_by_id(form_id)
+    form["_id"] = str(form["_id"])
+    return JSONResponse(status_code=200, content=form["form_json"])
+
+@app.get("/api/forms/{form_id}/check-deadline")
+async def api_check_deadline(form_id: str):
+    form = get_form_by_id(form_id)
+    deadline_passed = is_deadline_passed(form["deadline"])
+    return JSONResponse(
+        status_code=200, 
+        content={
+            "form_id": form_id,
+            "form_name": form["form_name"],
+            "deadline": form["deadline"],
+            "deadline_passed": deadline_passed
+        }
+    )
+
+
+
+@app.get("/api/get_forms")
+async def api_get_forms():
+    forms = get_all_forms()
+    return JSONResponse(status_code=200, content=forms)
