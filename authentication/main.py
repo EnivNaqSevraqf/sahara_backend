@@ -22,6 +22,8 @@ from fastapi.middleware.cors import CORSMiddleware
 # Database and ORM Setup
 # ----------------------------
 # Update with your PostgreSQL credentials - the default username is usually "postgres"
+
+# TODO: This ig is a local database, idk how to make a public one or smthg
 SQLALCHEMY_DATABASE_URL = "postgresql://postgres:hello123@localhost/maindb"
 
 # Add debug prints to diagnose database connection issues
@@ -279,7 +281,10 @@ def login(request: ExtendedLoginRequest, db: Session = Depends(get_db)):
     token = generate_token({"sub": user.username, "role": role}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     return {"access_token": token, "token_type": "bearer"}
 
-# Update the reset_password function
+# TODO: create a /forgot-password endpoint which asks the user for the email, checks if the user is registered in the database, generates a otp, stores it in a temp database, sends the otp
+# TODO: create /verify-otp which asks a otp from the user and checks if it is correct or not, if correct it generats a jwt token and sends the user to /reset-password.
+# TODO: The implementation of reset-password should be changed as it currently allows only logged in users to change their password. the new implementation should take the jwt from /verify-otp and allow to change only that
+# users password.
 @app.post("/reset-password")
 def reset_password(
     new_password: str = Body(..., embed=True),
@@ -589,22 +594,3 @@ def register_temp(
         "username": username
     }
 
-# ----------------------------
-# Templates for Additional Endpoints
-# ----------------------------
-
-# TODO: Implement OTP generation (e.g., /forgot-password) and CSV extraction for bulk user creation.
-# @app.post("/forgot-password")
-# def forgot_password(request: ForgotPasswordRequest, db: Session = Depends(get_db)):
-#     """
-#     Check if email exists, generate OTP, store it, and send OTP via email.
-#     """
-#     pass
-
-# @app.post("/upload-csv")
-# def upload_csv(file: UploadFile, role: UserRole, db: Session = Depends(get_db)):
-#     """
-#     Extract data from a CSV file and create multiple users (e.g., students or TAs).
-#     and commit it in the database.
-#     """
-#     pass
