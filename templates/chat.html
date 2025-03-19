@@ -274,6 +274,12 @@
             const currentActive = channelsContainer.querySelector('.active');
             if (currentActive) currentActive.classList.remove('active');
             
+            // Close existing socket for previous channel
+            if (currentChannel && sockets[currentChannel.id]) {
+                sockets[currentChannel.id].close();
+                delete sockets[currentChannel.id];
+            }
+            
             // Update current channel and UI
             currentChannel = channel;
             channelHeader.textContent = channel.name;
@@ -383,7 +389,10 @@
             
             socket.onmessage = function(event) {
                 const message = JSON.parse(event.data);
-                addMessage(message);
+                // Only add messages from other users (our own messages are added immediately after sending)
+                if (message.sender_id !== currentUser.id) {
+                    addMessage(message);
+                }
             };
             
             socket.onerror = function(error) {
@@ -394,7 +403,7 @@
                 console.log(`Channel ${channelId} connection closed`);
                 delete sockets[channelId];
                 
-                // Try to reconnect after a delay
+                // Try to reconnect after a delay if this is still the current channel
                 setTimeout(() => {
                     if (currentChannel && currentChannel.id === channelId) {
                         connectWebSocket(channelId);

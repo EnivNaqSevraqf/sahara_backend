@@ -123,62 +123,36 @@ async def startup_event():
 # WebSocket connection manager
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: Dict[str, Dict[int, WebSocket]] = {
-            'global': {},
-            'team': {}
-        }
+        self.rooms: Dict[str, List[WebSocket]] = {}
     
     async def connect(self, websocket: WebSocket, channel_id: int, user_id: int):
         await websocket.accept()
-        channel_type = self.get_channel_type(channel_id)
-        if channel_type not in self.active_connections:
-            self.active_connections[channel_type] = {}
-        self.active_connections[channel_type][user_id] = websocket
+        room_name = f"channel_{channel_id}"
+        
+        if room_name not in self.rooms:
+            self.rooms[room_name] = []
+        
+        self.rooms[room_name].append(websocket)
+        # Store user_id in websocket state for later use
+        websocket.user_id = user_id
     
-    def disconnect(self, channel_id: int, user_id: int):
-        channel_type = self.get_channel_type(channel_id)
-        if channel_type in self.active_connections and user_id in self.active_connections[channel_type]:
-            del self.active_connections[channel_type][user_id]
+    def disconnect(self, websocket: WebSocket, channel_id: int):
+        room_name = f"channel_{channel_id}"
+        if room_name in self.rooms:
+            self.rooms[room_name].remove(websocket)
+            if not self.rooms[room_name]:
+                del self.rooms[room_name]
     
     async def broadcast(self, message: str, channel_id: int, exclude_user: Optional[int] = None):
-        channel_type = self.get_channel_type(channel_id)
-        if channel_type == 'global':
-            connections = self.active_connections['global']
-        else:
-            team_id = self.get_team_id(channel_id)
-            connections = {uid: ws for uid, ws in self.active_connections['team'].items()
-                         if self.get_user_team(uid) == team_id}
-        
-        for user_id, connection in connections.items():
-            if user_id != exclude_user:
-                await connection.send_text(message)
-    
-    def get_channel_type(self, channel_id: int) -> str:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT type FROM channels WHERE id = %s", (channel_id,))
-        result = cur.fetchone()
-        cur.close()
-        conn.close()
-        return result['type'] if result else 'global'
-    
-    def get_team_id(self, channel_id: int) -> Optional[int]:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT team_id FROM channels WHERE id = %s", (channel_id,))
-        result = cur.fetchone()
-        cur.close()
-        conn.close()
-        return result['team_id'] if result else None
-    
-    def get_user_team(self, user_id: int) -> Optional[int]:
-        conn = psycopg2.connect(**DB_CONFIG)
-        cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("SELECT team_id FROM students WHERE id = %s", (user_id,))
-        result = cur.fetchone()
-        cur.close()
-        conn.close()
-        return result['team_id'] if result else None
+        room_name = f"channel_{channel_id}"
+        if room_name in self.rooms:
+            for connection in self.rooms[room_name]:
+                if not exclude_user or getattr(connection, 'user_id', None) != exclude_user:
+                    try:
+                        await connection.send_text(message)
+                    except Exception:
+                        # Remove dead connections
+                        self.rooms[room_name].remove(connection)
 
 manager = ConnectionManager()
 
@@ -331,7 +305,7 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, user_id: int
             data = await websocket.receive_text()
             # Keep connection alive, messages handled through HTTP endpoints
     except WebSocketDisconnect:
-        manager.disconnect(channel_id, user_id)
+        manager.disconnect(websocket, channel_id)
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
