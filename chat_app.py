@@ -4,8 +4,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Optional
 from pydantic import BaseModel
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import redis
 import json
 import os
 from datetime import datetime
@@ -26,93 +25,154 @@ app.add_middleware(
 # Set up templates directory
 templates = Jinja2Templates(directory="templates")
 
-# Database configuration
-DB_CONFIG = {
-    "dbname": "chat_db",
-    "user": "postgres",
-    "password": "postgres",
-    "host": "localhost"
+# Redis configuration
+REDIS_CONFIG = {
+    "host": "localhost",
+    "port": 6379,
+    "db": 0,
+    "decode_responses": True  # This ensures Redis returns strings instead of bytes
 }
 
+# Redis connection
+redis_client = redis.Redis(**REDIS_CONFIG)
+
 def init_db():
-    """Initialize the database with required tables"""
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
-    
-    # Create teams table
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS teams (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(50) NOT NULL
-    )
-    ''')
-    
-    # Create students table
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS students (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(50) NOT NULL,
-        password VARCHAR(50) NOT NULL,
-        roll_no VARCHAR(50) UNIQUE NOT NULL,
-        team_id INTEGER REFERENCES teams(id)
-    )
-    ''')
-    
-    # Create channels table
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS channels (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(50) NOT NULL,
-        type VARCHAR(10) NOT NULL CHECK (type IN ('global', 'team')),
-        team_id INTEGER REFERENCES teams(id)
-    )
-    ''')
-    
-    # Create messages table
-    cur.execute('''
-    CREATE TABLE IF NOT EXISTS messages (
-        id SERIAL PRIMARY KEY,
-        content TEXT NOT NULL,
-        sender_id INTEGER REFERENCES students(id),
-        channel_id INTEGER REFERENCES channels(id),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # Insert dummy data if not exists
-    cur.execute("SELECT COUNT(*) FROM teams")
-    if cur.fetchone()[0] == 0:
-        # Insert teams
-        cur.execute('''
-        INSERT INTO teams (name) VALUES 
-        ('Team A'), ('Team B'), ('Team C')
-        ''')
+    """Initialize the database with required data structures and dummy data"""
+    try:
+        print("Checking Redis connection...")
+        if not redis_client.ping():
+            print("Redis connection failed!")
+            return
+        print("Redis connection successful")
         
-        # Insert students (5 students per team)
-        for team_id in range(1, 4):
-            for i in range(5):
-                student_num = (team_id - 1) * 5 + i + 1
-                cur.execute('''
-                INSERT INTO students (name, password, roll_no, team_id)
-                VALUES (%s, %s, %s, %s)
-                ''', (f'Student {student_num}', 'password', f'ROLL{student_num}', team_id))
+        print("Current Redis keys:", redis_client.keys("*"))
         
-        # Create global channel
-        cur.execute('''
-        INSERT INTO channels (name, type, team_id)
-        VALUES ('Global Chat', 'global', NULL)
-        ''')
-        
-        # Create team channels
-        for team_id in range(1, 4):
-            cur.execute('''
-            INSERT INTO channels (name, type, team_id)
-            VALUES (%s, 'team', %s)
-            ''', (f'Team {team_id} Chat', team_id))
-    
-    conn.commit()
-    cur.close()
-    conn.close()
+        # Only initialize if the database is empty
+        if not redis_client.exists("team:counter"):
+            print("Initializing database with dummy data...")
+            try:
+                # Initialize counters
+                print("Setting up counters...")
+                redis_client.set("team:counter", "0")
+                redis_client.set("student:counter", "0")
+                redis_client.set("ta:counter", "0")
+                redis_client.set("channel:counter", "0")
+                redis_client.set("message:counter", "0")
+                
+                print("Creating teams...")
+                # Create teams and TAs
+                for team_name in ["Team A", "Team B", "Team C"]:
+                    try:
+                        team_id = redis_client.incr("team:counter")
+                        print(f"Creating team {team_name} with ID {team_id}")
+                        team_key = f"team:{team_id}"
+                        
+                        # Store team data
+                        redis_client.hset(team_key, "id", str(team_id))
+                        redis_client.hset(team_key, "name", team_name)
+                        redis_client.sadd("teams", team_id)
+                        print(f"Team {team_name} created successfully")
+                        
+                        # Create TA for the team
+                        ta_id = redis_client.incr("ta:counter")
+                        ta_key = f"ta:{ta_id}"
+                        redis_client.hset(ta_key, "id", str(ta_id))
+                        redis_client.hset(ta_key, "name", f"TA {team_id}")
+                        redis_client.hset(ta_key, "team_id", str(team_id))
+                        redis_client.sadd("tas", ta_id)
+                        redis_client.hset(team_key, "ta_id", str(ta_id))
+                        print(f"TA created for {team_name}")
+                        
+                        try:
+                            # Create team channel
+                            channel_id = redis_client.incr("channel:counter")
+                            print(f"Creating channel for team {team_name}")
+                            channel_key = f"channel:{channel_id}"
+                            redis_client.hset(channel_key, "id", str(channel_id))
+                            redis_client.hset(channel_key, "name", f"{team_name} Chat")
+                            redis_client.hset(channel_key, "type", "team")
+                            redis_client.hset(channel_key, "team_id", str(team_id))
+                            redis_client.sadd("channels", channel_id)
+                            print(f"Channel for team {team_name} created successfully")
+                            
+                            # Create TA channel for the team
+                            ta_channel_id = redis_client.incr("channel:counter")
+                            print(f"Creating TA channel for team {team_name}")
+                            ta_channel_key = f"channel:{ta_channel_id}"
+                            redis_client.hset(ta_channel_key, "id", str(ta_channel_id))
+                            redis_client.hset(ta_channel_key, "name", f"{team_name} TA Chat")
+                            redis_client.hset(ta_channel_key, "type", "ta")
+                            redis_client.hset(ta_channel_key, "team_id", str(team_id))
+                            redis_client.sadd("channels", ta_channel_id)
+                            print(f"TA Channel for team {team_name} created successfully")
+                        except Exception as channel_error:
+                            print(f"Error creating channels for team {team_name}: {channel_error}")
+                            raise
+                        
+                        try:
+                            # Create students for each team
+                            print(f"Creating students for team {team_name}")
+                            for i in range(5):
+                                student_id = redis_client.incr("student:counter")
+                                student_num = (team_id - 1) * 5 + i + 1
+                                print(f"Creating student {student_num}")
+                                student_key = f"student:{student_id}"
+                                redis_client.hset(student_key, "id", str(student_id))
+                                redis_client.hset(student_key, "name", f"Student {student_num}")
+                                redis_client.hset(student_key, "password", "password")
+                                redis_client.hset(student_key, "roll_no", f"ROLL{student_num}")
+                                redis_client.hset(student_key, "team_id", str(team_id))
+                                redis_client.sadd("students", student_id)
+                                redis_client.sadd(f"team:{team_id}:students", student_id)
+                                print(f"Student {student_num} created successfully")
+                        except Exception as student_error:
+                            print(f"Error creating students for team {team_name}: {student_error}")
+                            raise
+                            
+                    except Exception as team_error:
+                        print(f"Error processing team {team_name}: {team_error}")
+                        raise
+
+                try:
+                    # Create global channel
+                    print("Creating global channel...")
+                    global_channel_id = redis_client.incr("channel:counter")
+                    redis_client.hset(f"channel:{global_channel_id}", "id", str(global_channel_id))
+                    redis_client.hset(f"channel:{global_channel_id}", "name", "Global Chat")
+                    redis_client.hset(f"channel:{global_channel_id}", "type", "global")
+                    redis_client.hset(f"channel:{global_channel_id}", "team_id", "")
+                    redis_client.sadd("channels", global_channel_id)
+                    print("Global channel created successfully")
+                except Exception as global_channel_error:
+                    print(f"Error creating global channel: {global_channel_error}")
+                    raise
+
+            except Exception as init_error:
+                print(f"Error during initialization: {init_error}")
+                raise
+                
+            print("\nVerifying created data:")
+            print("Teams:", redis_client.smembers("teams"))
+            print("TAs:", redis_client.smembers("tas"))
+            print("Channels:", redis_client.smembers("channels"))
+            print("Students:", redis_client.smembers("students"))
+            print("All keys:", redis_client.keys("*"))
+            
+        else:
+            print("Database already initialized")
+            print("Current keys:", redis_client.keys("*"))
+            print("Teams:", redis_client.smembers("teams"))
+            print("TAs:", redis_client.smembers("tas"))
+            print("Channels:", redis_client.smembers("channels"))
+            print("Students:", redis_client.smembers("students"))
+
+    except redis.RedisError as e:
+        print(f"Redis error during initialization: {e}")
+        raise
+    except Exception as e:
+        print(f"Unexpected error during initialization: {e}")
+        print(f"Error type: {type(e)}")
+        raise
 
 # Initialize database on startup
 @app.on_event("startup")
@@ -133,7 +193,6 @@ class ConnectionManager:
             self.rooms[room_name] = []
         
         self.rooms[room_name].append(websocket)
-        # Store user_id in websocket state for later use
         websocket.user_id = user_id
     
     def disconnect(self, websocket: WebSocket, channel_id: int):
@@ -151,7 +210,6 @@ class ConnectionManager:
                     try:
                         await connection.send_text(message)
                     except Exception:
-                        # Remove dead connections
                         self.rooms[room_name].remove(connection)
 
 manager = ConnectionManager()
@@ -166,75 +224,99 @@ class Message(BaseModel):
     sender_id: int
 
 # Database helper functions
-def get_db_connection():
-    return psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
-
 def get_user_by_name(name: str):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM students WHERE name = %s", (name,))
-    user = cur.fetchone()
-    cur.close()
-    conn.close()
-    return user
+    print(f"Searching for user with name: '{name}'")
+    # First check students
+    for student_id in redis_client.smembers("students"):
+        student_data = redis_client.hgetall(f"student:{student_id}")
+        if student_data.get("name") == name:
+            student_data["user_type"] = "student"
+            print(f"Found matching student: {student_data}")
+            return student_data
+            
+    # Then check TAs
+    for ta_id in redis_client.smembers("tas"):
+        ta_data = redis_client.hgetall(f"ta:{ta_id}")
+        if ta_data.get("name") == name:
+            ta_data["user_type"] = "ta"
+            print(f"Found matching TA: {ta_data}")
+            return ta_data
+            
+    print("No matching user found")
+    return None
 
-def get_channels_for_user(user_id: int):
-    conn = get_db_connection()
-    cur = conn.cursor()
+def get_channels_for_user(user_id: int, user_type: str):
+    channels = []
+    team_id = None
     
-    # Get user's team_id
-    cur.execute("SELECT team_id FROM students WHERE id = %s", (user_id,))
-    user = cur.fetchone()
-    team_id = user['team_id'] if user else None
-    
-    # Get available channels
-    cur.execute("""
-        SELECT * FROM channels 
-        WHERE type = 'global' 
-        OR (type = 'team' AND team_id = %s)
-    """, (team_id,))
-    
-    channels = cur.fetchall()
-    cur.close()
-    conn.close()
+    if user_type == "student":
+        student_data = redis_client.hgetall(f"student:{user_id}")
+        team_id = student_data.get("team_id")
+    else:  # TA
+        ta_data = redis_client.hgetall(f"ta:{user_id}")
+        team_id = ta_data.get("team_id")
+
+    # Get all channels
+    for channel_id in redis_client.smembers("channels"):
+        channel_data = redis_client.hgetall(f"channel:{channel_id}")
+        channel_type = channel_data.get("type")
+        channel_team_id = channel_data.get("team_id")
+        
+        if user_type == "ta":
+            # TAs can access only TA channel of their team and global channel
+            if (channel_type == "global" or 
+                (channel_type == "ta" and channel_team_id == team_id)):
+                channels.append(channel_data)
+        else:  # student
+            # Students can access team channel, team's TA channel, and global channel
+            if (channel_type == "global" or 
+                (channel_type in ["team", "ta"] and channel_team_id == team_id)):
+                channels.append(channel_data)
+
     return channels
 
-def save_message(sender_id: int, channel_id: int, content: str):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    cur.execute("""
-        INSERT INTO messages (sender_id, channel_id, content)
-        VALUES (%s, %s, %s)
-        RETURNING id, created_at
-    """, (sender_id, channel_id, content))
-    
-    result = cur.fetchone()
-    conn.commit()
-    cur.close()
-    conn.close()
-    return result
+def save_message(sender_id: int, channel_id: int, content: str, user_type: str = "student"):
+    try:
+        print(f"Saving message - sender_id: {sender_id}, channel_id: {channel_id}, content: {content}")
+        message_id = redis_client.incr("message:counter")
+        timestamp = datetime.now().isoformat()
+        
+        message_data = {
+            "id": str(message_id),
+            "content": content,
+            "sender_id": str(sender_id),
+            "channel_id": str(channel_id),
+            "created_at": timestamp,
+            "user_type": user_type
+        }
+        
+        print(f"Message data to store: {message_data}")
+        redis_client.hmset(f"message:{message_id}", message_data)
+        redis_client.zadd(f"channel:{channel_id}:messages", {message_id: message_id})
+        
+        print(f"Successfully saved message with ID: {message_id}")
+        return message_data
+    except Exception as e:
+        print(f"Error in save_message: {str(e)}")
+        raise
 
 def get_recent_messages(channel_id: int, limit: int = 50):
-    conn = get_db_connection()
-    cur = conn.cursor()
+    messages = []
+    message_ids = redis_client.zrange(f"channel:{channel_id}:messages", 0, limit-1)
     
-    cur.execute("""
-        SELECT m.*, s.name as sender_name
-        FROM messages m
-        JOIN students s ON m.sender_id = s.id
-        WHERE m.channel_id = %s
-        ORDER BY m.created_at DESC
-        LIMIT %s
-    """, (channel_id, limit))
+    for msg_id in message_ids:
+        message_data = redis_client.hgetall(f"message:{msg_id}")
+        if message_data:
+            # Get sender info based on user type
+            user_type = message_data.get("user_type", "student")
+            if user_type == "ta":
+                sender_data = redis_client.hgetall(f"ta:{message_data['sender_id']}")
+            else:
+                sender_data = redis_client.hgetall(f"student:{message_data['sender_id']}")
+            
+            message_data["sender_name"] = sender_data.get("name", "Unknown")
+            messages.append(message_data)
     
-    messages = cur.fetchall()
-    cur.close()
-    conn.close()
-    
-    # Convert to list and reverse to show oldest first
-    messages = list(messages)
-    messages.reverse()
     return messages
 
 # API Routes
@@ -244,13 +326,16 @@ async def get_chat_page(request: Request):
 
 @app.post("/api/login")
 async def login(user: User):
+    print(f"Login attempt for user: '{user.name}'")
     db_user = get_user_by_name(user.name)
     if db_user:
-        channels = get_channels_for_user(db_user['id'])
+        user_type = db_user.get("user_type", "student")
+        channels = get_channels_for_user(int(db_user["id"]), user_type)
         return {
-            "id": db_user['id'],
-            "name": db_user['name'],
-            "team_id": db_user['team_id'],
+            "id": int(db_user["id"]),
+            "name": db_user["name"],
+            "team_id": db_user["team_id"],
+            "user_type": user_type,
             "channels": channels
         }
     raise HTTPException(status_code=404, detail="User not found")
@@ -266,35 +351,47 @@ async def get_messages(channel_id: int):
 @app.post("/api/messages")
 async def send_message(message: Message):
     try:
-        result = save_message(message.sender_id, message.channel_id, message.content)
+        print(f"Received message request - sender: {message.sender_id}, channel: {message.channel_id}")
         
-        # Get sender info
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM students WHERE id = %s", (message.sender_id,))
-        sender = cur.fetchone()
-        cur.close()
-        conn.close()
+        # Determine user type
+        user_type = "student"
+        if redis_client.sismember("tas", str(message.sender_id)):
+            user_type = "ta"
         
+        result = save_message(message.sender_id, message.channel_id, message.content, user_type)
+        
+        print("Getting sender info...")
+        # Get sender info based on user type
+        if user_type == "ta":
+            sender = redis_client.hgetall(f"ta:{message.sender_id}")
+        else:
+            sender = redis_client.hgetall(f"student:{message.sender_id}")
+            
+        if not sender:
+            print(f"Warning: Sender {message.sender_id} not found in Redis")
+            
         # Format message for broadcasting
         message_data = {
-            "id": result['id'],
+            "id": result["id"],
             "content": message.content,
             "sender_id": message.sender_id,
-            "sender_name": sender['name'],
+            "sender_name": sender.get("name", "Unknown"),
             "channel_id": message.channel_id,
-            "created_at": result['created_at'].isoformat()
+            "created_at": result["created_at"],
+            "user_type": user_type
         }
         
-        # Broadcast to channel members excluding sender (since frontend already shows the message)
+        print(f"Broadcasting message: {message_data}")
+        
         await manager.broadcast(
             json.dumps(message_data),
             message.channel_id,
-            message.sender_id  # Exclude sender to avoid duplicate messages
+            message.sender_id
         )
         
         return message_data
     except Exception as e:
+        print(f"Error in send_message endpoint: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.websocket("/ws/{channel_id}/{user_id}")
