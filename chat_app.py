@@ -1,5 +1,5 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, UploadFile, File
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Optional
@@ -9,6 +9,12 @@ import json
 import os
 from datetime import datetime
 import uvicorn
+import shutil
+from pathlib import Path
+
+# Define upload directory
+UPLOAD_DIR = Path(__file__).parent / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
 
 # Create app
 app = FastAPI()
@@ -55,7 +61,6 @@ def init_db():
                 print("Setting up counters...")
                 redis_client.set("team:counter", "0")
                 redis_client.set("student:counter", "0")
-                redis_client.set("ta:counter", "0")
                 redis_client.set("channel:counter", "0")
                 redis_client.set("message:counter", "0")
                 
@@ -73,8 +78,8 @@ def init_db():
                         redis_client.sadd("teams", team_id)
                         print(f"Team {team_name} created successfully")
                         
-                        # Create TA for the team
-                        ta_id = redis_client.incr("ta:counter")
+                        # Create TA for the team (using IDs 16-18)
+                        ta_id = 15 + team_id  # This will give us TAs with IDs 16, 17, 18
                         ta_key = f"ta:{ta_id}"
                         redis_client.hset(ta_key, "id", str(ta_id))
                         redis_client.hset(ta_key, "name", f"TA {team_id}")
@@ -222,6 +227,7 @@ class Message(BaseModel):
     content: str
     channel_id: int
     sender_id: int
+    is_file: bool = False
 
 # Database helper functions
 def get_user_by_name(name: str):
@@ -275,26 +281,39 @@ def get_channels_for_user(user_id: int, user_type: str):
 
     return channels
 
-def save_message(sender_id: int, channel_id: int, content: str, user_type: str = "student"):
+def save_message(sender_id: int, channel_id: int, content: str, user_type: str = None):
     try:
-        print(f"Saving message - sender_id: {sender_id}, channel_id: {channel_id}, content: {content}")
+        print(f"Debug - save_message: sender_id={sender_id}, checking if TA...")
+        # Explicitly check if the sender_id matches any TA ids (16-18)
+        is_ta = 16 <= int(sender_id) <= 18
+        user_type = "ta" if is_ta else "student"
+        print(f"Debug - determined user_type: {user_type}")
+
         message_id = redis_client.incr("message:counter")
         timestamp = datetime.now().isoformat()
+        
+        # Get sender info from correct set based on user type
+        if user_type == "ta":
+            sender = redis_client.hgetall(f"ta:{sender_id}")
+        else:
+            sender = redis_client.hgetall(f"student:{sender_id}")
+            
+        print(f"Debug - Found sender info: {sender}")
         
         message_data = {
             "id": str(message_id),
             "content": content,
             "sender_id": str(sender_id),
+            "sender_name": sender.get("name", "Unknown"),
             "channel_id": str(channel_id),
             "created_at": timestamp,
             "user_type": user_type
         }
         
-        print(f"Message data to store: {message_data}")
+        print(f"Debug - Final message data: {message_data}")
         redis_client.hmset(f"message:{message_id}", message_data)
         redis_client.zadd(f"channel:{channel_id}:messages", {message_id: message_id})
         
-        print(f"Successfully saved message with ID: {message_id}")
         return message_data
     except Exception as e:
         print(f"Error in save_message: {str(e)}")
@@ -351,47 +370,58 @@ async def get_messages(channel_id: int):
 @app.post("/api/messages")
 async def send_message(message: Message):
     try:
-        print(f"Received message request - sender: {message.sender_id}, channel: {message.channel_id}")
-        
-        # Determine user type
-        user_type = "student"
-        if redis_client.sismember("tas", str(message.sender_id)):
-            user_type = "ta"
+        print(f"Debug - Received message from sender_id: {message.sender_id}")
+        # Determine user type by ID range
+        user_type = "ta" if 16 <= message.sender_id <= 18 else "student"
+        print(f"Debug - Determined user_type: {user_type}")
         
         result = save_message(message.sender_id, message.channel_id, message.content, user_type)
         
-        print("Getting sender info...")
-        # Get sender info based on user type
-        if user_type == "ta":
-            sender = redis_client.hgetall(f"ta:{message.sender_id}")
-        else:
-            sender = redis_client.hgetall(f"student:{message.sender_id}")
-            
-        if not sender:
-            print(f"Warning: Sender {message.sender_id} not found in Redis")
-            
-        # Format message for broadcasting
-        message_data = {
-            "id": result["id"],
-            "content": message.content,
-            "sender_id": message.sender_id,
-            "sender_name": sender.get("name", "Unknown"),
-            "channel_id": message.channel_id,
-            "created_at": result["created_at"],
-            "user_type": user_type
-        }
-        
-        print(f"Broadcasting message: {message_data}")
-        
         await manager.broadcast(
-            json.dumps(message_data),
+            json.dumps(result),
             message.channel_id,
             message.sender_id
         )
         
-        return message_data
+        return result
     except Exception as e:
         print(f"Error in send_message endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile, channel_id: int, sender_id: int):
+    try:
+        # Create channel directory if it doesn't exist
+        channel_dir = UPLOAD_DIR / str(channel_id)
+        channel_dir.mkdir(exist_ok=True)
+        
+        # Save file with timestamp to ensure uniqueness
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_")
+        file_path = channel_dir / f"{timestamp}{file.filename}"
+        
+        with file_path.open("wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+        return {
+            "filename": file_path.name,
+            "original_name": file.filename,
+            "status": "success"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/download/{channel_id}/{filename}")
+async def download_file(channel_id: int, filename: str):
+    try:
+        file_path = UPLOAD_DIR / str(channel_id) / filename
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+            
+        return FileResponse(
+            path=file_path,
+            filename=filename.split("_", 2)[2]  # Remove timestamp prefix
+        )
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.websocket("/ws/{channel_id}/{user_id}")

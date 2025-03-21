@@ -27,11 +27,10 @@
             box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
         }
         .sidebar {
-            width: 250px;
+            width: 280px;
             background-color: #2c3e50;
             color: white;
             padding: 20px;
-            overflow-y: auto;
             display: flex;
             flex-direction: column;
         }
@@ -82,6 +81,7 @@
             display: flex;
             padding: 15px;
             border-top: 1px solid #e9e9e9;
+            gap: 10px;
         }
         .chat-form input {
             flex-grow: 1;
@@ -101,16 +101,42 @@
         .chat-form button:hover {
             background-color: #2980b9;
         }
+        .attach-button {
+            padding: 10px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 40px;
+        }
+        .attach-button:hover {
+            background-color: #2980b9;
+        }
+        .attach-button:disabled {
+            background-color: #bdc3c7;
+            cursor: not-allowed;
+        }
         .login-area {
             padding: 20px;
-            margin-top: auto;
+            background-color: #34495e;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+        .login-area h3 {
+            margin-bottom: 15px;
+            color: white;
         }
         .login-area input {
             width: 100%;
             padding: 10px;
             margin-bottom: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
+            border: none;
+            border-radius: 4px;
+            background-color: #fff;
         }
         .login-area button {
             width: 100%;
@@ -118,11 +144,14 @@
             background-color: #3498db;
             color: white;
             border: none;
-            border-radius: 5px;
+            border-radius: 4px;
             cursor: pointer;
         }
-        .login-area button:hover {
-            background-color: #2980b9;
+        .error-message {
+            color: #e74c3c;
+            font-size: 14px;
+            margin-top: 5px;
+            display: none;
         }
         .channels-list {
             flex-grow: 1;
@@ -151,25 +180,49 @@
             border-bottom: 1px solid #34495e;
             margin-bottom: 15px;
         }
+        .message-file {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background-color: #f0f0f0;
+            padding: 8px;
+            border-radius: 5px;
+            margin-top: 5px;
+        }
+        
+        .message-file a {
+            color: #3498db;
+            text-decoration: none;
+        }
+        
+        .message-file a:hover {
+            text-decoration: underline;
+        }
+        .message-preview {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            color: #666;
+            font-style: italic;
+        }
     </style>
 </head>
 <body>
     <div class="container">
         <aside class="sidebar">
+            <div class="login-area" id="login-area">
+                <h3>Login</h3>
+                <input type="text" id="username-input" placeholder="Enter your name" />
+                <button id="login-button">Login</button>
+                <div id="login-error" class="error-message"></div>
+            </div>
             <div class="user-info" id="user-info" style="display: none;">
                 <h3>Welcome, <span id="user-name"></span></h3>
                 <p>Team: <span id="team-name"></span></p>
             </div>
             <div class="channels-list">
                 <h3>Channels</h3>
-                <div id="channels-container">
-                    <!-- Channels will be populated here -->
-                </div>
-            </div>
-            <div class="login-area" id="login-area">
-                <h3>Login</h3>
-                <input type="text" id="username-input" placeholder="Enter your name" />
-                <button id="login-button">Login</button>
+                <div id="channels-container"></div>
             </div>
         </aside>
         <main class="main">
@@ -180,6 +233,8 @@
                 <!-- Messages will be populated here -->
             </div>
             <form class="chat-form" id="message-form">
+                <input type="file" id="file-input" style="display: none;" />
+                <button type="button" id="attach-button" class="attach-button" disabled>📎</button>
                 <input type="text" id="message-input" placeholder="Type a message..." disabled />
                 <button type="submit" id="send-button" disabled>Send</button>
             </form>
@@ -191,6 +246,7 @@
         let currentUser = null;
         let currentChannel = null;
         let sockets = {};
+        let stagedFile = null;  // Add this with other global variables
         
         // DOM elements
         const messagesContainer = document.getElementById('messages-container');
@@ -205,6 +261,8 @@
         const userName = document.getElementById('user-name');
         const teamName = document.getElementById('team-name');
         const channelHeader = document.getElementById('channel-header');
+        const fileInput = document.getElementById('file-input');
+        const attachButton = document.getElementById('attach-button');
 
         // Function to format timestamps
         function formatTime(timestamp) {
@@ -228,7 +286,23 @@
             infoDiv.textContent = `${message.sender_name} • ${timestamp}`;
             
             const contentDiv = document.createElement('div');
-            contentDiv.textContent = message.content;
+            
+            // Check if message contains file
+            if (message.content.startsWith('__file__:')) {
+                const [, filename, originalName] = message.content.split(':');
+                const fileDiv = document.createElement('div');
+                fileDiv.classList.add('message-file');
+                
+                const downloadLink = document.createElement('a');
+                downloadLink.href = `/api/download/${currentChannel.id}/${filename}`;
+                downloadLink.download = originalName;
+                downloadLink.textContent = `📎 ${originalName}`;
+                
+                fileDiv.appendChild(downloadLink);
+                contentDiv.appendChild(fileDiv);
+            } else {
+                contentDiv.textContent = message.content;
+            }
             
             messageDiv.appendChild(infoDiv);
             messageDiv.appendChild(contentDiv);
@@ -344,20 +418,23 @@
                     }),
                 });
                 
+                const userData = await response.json();
+                
                 if (!response.ok) {
-                    throw new Error('User not found');
+                    throw new Error(userData.detail || 'Login failed');
                 }
                 
-                const userData = await response.json();
                 currentUser = userData;
                 
                 // Update UI
+                document.getElementById('login-error').style.display = 'none';
                 userInfo.style.display = 'block';
                 loginArea.style.display = 'none';
                 userName.textContent = currentUser.name;
                 teamName.textContent = `Team ${currentUser.team_id}`;
                 messageInput.disabled = false;
                 sendButton.disabled = false;
+                attachButton.disabled = false;
                 
                 // Setup channels
                 channelsContainer.innerHTML = '';
@@ -373,7 +450,9 @@
                 }
             } catch (error) {
                 console.error('Error logging in:', error);
-                alert('User not found');
+                const loginError = document.getElementById('login-error');
+                loginError.textContent = error.message || 'Failed to login. Please try again.';
+                loginError.style.display = 'block';
             }
         }
 
@@ -415,11 +494,41 @@
         }
 
         // Event listeners
-        messageForm.addEventListener('submit', function(e) {
+        messageForm.addEventListener('submit', async function(e) {
             e.preventDefault();
-            const message = messageInput.value;
-            if (message.trim()) {
-                sendMessage(message);
+            
+            if (stagedFile) {
+                // Handle file upload
+                const formData = new FormData();
+                formData.append('file', stagedFile);
+                
+                try {
+                    const response = await fetch(`/api/upload?channel_id=${currentChannel.id}&sender_id=${currentUser.id}`, {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (!response.ok) throw new Error('Upload failed');
+                    
+                    const result = await response.json();
+                    await sendMessage(`__file__:${result.filename}:${result.original_name}`);
+                    
+                    // Reset file input and staged file
+                    fileInput.value = '';
+                    stagedFile = null;
+                    messageInput.disabled = false;
+                    messageInput.value = '';
+                } catch (error) {
+                    console.error('Error uploading file:', error);
+                    alert('Failed to upload file');
+                }
+            } else {
+                // Handle regular text message
+                const message = messageInput.value;
+                if (message.trim()) {
+                    await sendMessage(message);
+                    messageInput.value = '';
+                }
             }
         });
         
@@ -430,6 +539,18 @@
         usernameInput.addEventListener('keypress', function(e) {
             if (e.key === 'Enter') {
                 login(usernameInput.value);
+            }
+        });
+
+        attachButton.addEventListener('click', () => {
+            fileInput.click();
+        });
+        
+        fileInput.addEventListener('change', async (e) => {
+            if (e.target.files.length > 0) {
+                stagedFile = e.target.files[0];
+                messageInput.value = `📎 ${stagedFile.name}`;
+                messageInput.disabled = true;
             }
         });
 
