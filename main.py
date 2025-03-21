@@ -16,14 +16,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:8080"],  # More secure than ["*"]
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
-    allow_headers=["*"],
-)
-
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 models.Base.metadata.create_all(engine)
@@ -57,7 +49,7 @@ async def create(title: str=Form(...), description: str=Form(...), file: UploadF
         description_json = json.loads(description)
     except json.JSONDecodeError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
-
+    print(file_location)
     new_announcement = models.Announcements(
         title=title,
         description=description_json,
