@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File
+from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table
 from sqlalchemy.ext.declarative import declarative_base
@@ -10,6 +11,7 @@ import jwt
 import random
 import string
 from pydantic import BaseModel, EmailStr
+from typing import List, Dict, Any
 import enum
 import secrets
 import os
@@ -53,16 +55,23 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
     email = Column(String, nullable=False, unique=True)
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=False)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
     hashed_password = Column(String, nullable=False)
 
     role = relationship("Role", back_populates="users")
-    team = relationship("Team", back_populates="members") 
+    teams = relationship("Team", secondary="team_members", back_populates="members")
+    gradeables = relationship("Gradeable", back_populates="creator")
+    calendar_events = relationship("UserCalendarEvent", back_populates="creator")
+    team_calendar_events = relationship("TeamCalendarEvent", back_populates="creator")
 
 class Team(Base):
     __tablename__ = "teams"
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
     
+    members = relationship("User", secondary="team_members", back_populates="teams")
+
 class Form(Base):
     __tablename__ = "forms"
     id = Column(Integer, primary_key=True)
@@ -112,7 +121,7 @@ class FormResponse(Base):
 
     id = Column(Integer, primary_key=True)
     form_id = Column(Integer, ForeignKey("forms.id"), nullable=False)
-    submitted_at = Column(string, default=datetime.now(timezone.utc).isoformat())
+    submitted_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     response_data = Column(String, nullable=False)  # JSON or serialized response data
 
     form = relationship("Form", back_populates="responses")
@@ -136,10 +145,183 @@ class Gradeable(Base):
             raise ValueError("Students cannot create gradeables.")
         return value
 
+class GlobalCalendarEvent(Base):
+    __tablename__ = "global_calendar_events"
+    id = Column(Integer, primary_key=True)
+    events = Column(JSONB, nullable=False)
+    description = Column(String, nullable=False)
+    start_time = Column(String, nullable=False)
+    end_time = Column(String, nullable=False)
+    # creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+
+    # creator = relationship("User", back_populates="calendar_events")
+
+    # @validates("creator_id")
+    # def validate_creator(self, key, value):
+    #     user = SessionLocal.query(User).filter_by(id=value).first()
+    #     if user and user.role == RoleType.STUDENT:
+    #         raise ValueError("Students cannot create calendar events.")
+    #     return value
+
+class UserCalendarEvent(Base):
+    __tablename__ = "user_calendar_events"
+    id = Column(Integer, primary_key=True)
+    events = Column(JSONB, nullable=False)
+    description = Column(String, nullable=False)
+    start_time = Column(String, nullable=False)
+    end_time = Column(String, nullable=False)
+    creator_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+    created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+
+    creator = relationship("User", back_populates="calendar_events")
+
+    @validates("creator_id")
+    def validate_creator(self, key, value):
+        user = SessionLocal.query(User).filter_by(id=value).first()
+        if user and user.role == RoleType.STUDENT:
+            raise ValueError("Students cannot create calendar events.")
+        return value
+
+class TeamCalendarEvent(Base):
+    __tablename__ = "team_calendar_events"
+    id = Column(Integer, primary_key=True)
+    events = Column(JSONB, nullable=False)
+    description = Column(String, nullable=False)
+    start_time = Column(String, nullable=False)
+    end_time = Column(String, nullable=False)
+    creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+
+    creator = relationship("User", back_populates="team_calendar_events")
+
+    @validates("creator_id")
+    def validate_creator(self, key, value):
+        user = SessionLocal.query(User).filter_by(id=value).first()
+        if user and user.role == RoleType.STUDENT:
+            raise ValueError("Students cannot create calendar events.")
+        return value
+    
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
+# Database assisting functions
+
+
+
+## Calendar functions - get
+def get_global_events(db:Session):
+    top_row = db.query(GlobalCalendarEvent).first()
+    if top_row:
+        return top_row.events
+    return None
+
+def get_personal_events(user: User, db: Session):
+    row = db.query(UserCalendarEvent).filter_by(creator_id=user.id).first()
+    if row:
+        _events = row.events
+        for event in _events:
+            event["type"] = "personal"
+        return row.events
+    return None 
+
+def get_team_events(user: User, db: Session):
+    # if(user.role == RoleType.STUDENT):
+    assert(user.role == RoleType.STUDENT)
+    teams = user.teams
+    team_events = []
+    for team in teams:
+        row = db.query(TeamCalendarEvent).filter_by(creator_id=team.id).first()
+        if row:
+            _events = row.events
+            for event in _events:
+                event["type"] = "team"
+            team_events += _events
+    return team_events
+
+def get_events(user: User, db: Session):
+    '''
+    Get all events for a user
+
+    Assumes that global events, team events
+    and personal events are all lists
+    '''
+    global_events = get_global_events(db)
+    team_events = get_team_events(user, db)
+    personal_events = get_personal_events(user, db)
+    return global_events + team_events + personal_events
+
+
+def split_events(events):
+    global_events = []
+    personal_events = []
+    team_events = []
+    for event in events:
+        if "type" not in event:
+            continue
+        if event["type"] == "global":
+            global_events.append(event)
+        elif event["type"] == "personal":
+            personal_events.append(event)
+        elif event["type"] == "team":
+            team_events.append(event)
+        else:
+            continue # throw it
+    return global_events, personal_events, team_events
+
+## Calendar functions - overwriting
+def overwrite_global_events(events, db: Session):
+    '''
+    Overwrite the global events with the new events
+    '''
+    top_row = db.query(GlobalCalendarEvent).first()
+    if top_row:
+        print(events)
+        top_row.events = events
+    else:
+        top_row = GlobalCalendarEvent(events=events)
+        db.add(top_row)
+    db.commit()
+    db.refresh(top_row)
+
+def overwrite_personal_events(user: User, events, db: Session):
+    '''
+    Overwrite the personal events with the new events
+    '''
+    row = db.query(UserCalendarEvent).filter_by(creator_id=user.id).first()
+    if row:
+        row.events = events
+    else:
+        row = UserCalendarEvent(events=events, creator_id=user.id)
+        db.add(row)
+    db.commit()
+    db.refresh(row)
+
+def overwrite_team_events(user: User, events, db: Session):
+    '''
+    Overwrite the team events with the new events
+    '''
+    teams = user.teams
+    for team in teams:
+        row = db.query(TeamCalendarEvent).filter_by(creator_id=team.id).first()
+        if row:
+            row.events = events
+        else:
+            row = TeamCalendarEvent(events=events, creator_id=team.id)
+            db.add(row)
+    db.commit()
+    db.refresh(row)
+
+
 class QueryBaseModel(BaseModel):
     token: str = Header(None)
-
-
 
 
 class UserBase(BaseModel):
@@ -192,6 +374,7 @@ def check_user_permitted(user_id: int, role: RoleType):
 
 
 
+
 @app.get("/dashboard/gradeables") # TODO: 
 def get_gradeables():
     pass
@@ -204,6 +387,68 @@ def create_announcement():
 def get_announcements():
     pass
 
+@app.post("/quiz/create")
+def create_quiz():
+    pass
+
 @app.get("/forms/")
 def get_forms():
     pass
+
+@app.post("/forms/create")
+def create_form():
+    pass
+
+# Calendar
+
+class CalendarUpdateModel(BaseModel):
+    events: List[Any]
+    # token: str = Header(None)
+
+@app.post("/calendar/update")
+def update_calendar(
+    calendar_update_model: CalendarUpdateModel,
+    db: Session = Depends(get_db),
+    # user_id: int = Depends(resolve_token)
+):
+    # user = db.query(User).filter_by(id=user_id).first()
+    print(calendar_update_model.events)
+    global_events = calendar_update_model.events
+    # global_events, personal_events, team_events = split_events(calendar_update_model.events)
+    print(global_events)
+    overwrite_global_events(global_events, db)
+    return {"message": "Calendar updated"}
+    # if user.role == RoleType.PROF:
+    #     overwrite_global_events(events, db)
+    # elif user.role == RoleType.STUDENT:
+    #     overwrite_personal_events(user, events, db)
+    # elif user.role == RoleType.TA:
+    #     overwrite_team_events(user, events, db)
+    # return {"message": "Calendar updated"}
+    # if the role is admin
+    # select all the global events
+
+    # overwrite_global_events
+
+
+
+    
+    pass
+
+@app.get("/calendar/")
+def get_calendar(
+    db: Session = Depends(get_db),
+    # user_id: int = Depends(resolve_token)
+):
+    # Get the global events
+    global_events = get_global_events(db)
+    print(global_events)
+    return JSONResponse(status_code=201, content=global_events)
+    # return {"message": "Calendar retrieved", "events": global_events}
+
+
+
+@app.get("/people/")
+def get_people():
+    pass
+
