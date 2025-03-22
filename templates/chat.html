@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Team Chat Application</title>
+    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
     <style>
         * {
             box-sizing: border-box;
@@ -151,6 +152,43 @@
             border-bottom: 1px solid #34495e;
             margin-bottom: 15px;
         }
+        .file-upload-area {
+            padding: 10px;
+            border-top: 1px solid #e9e9e9;
+        }
+        
+        .shared-files {
+            padding: 10px;
+            max-height: 200px;
+            overflow-y: auto;
+            border-top: 1px solid #e9e9e9;
+        }
+        
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .message a {
+            color: inherit;
+            text-decoration: underline;
+        }
+
+        #attach-button {
+            padding: 10px 15px;
+            margin-right: 5px;
+            background-color: #3498db;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+
+        #attach-button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
     </style>
 </head>
 <body>
@@ -179,10 +217,17 @@
             <div class="chat-messages" id="messages-container">
                 <!-- Messages will be populated here -->
             </div>
-            <form class="chat-form" id="message-form">
-                <input type="text" id="message-input" placeholder="Type a message..." disabled />
-                <button type="submit" id="send-button" disabled>Send</button>
-            </form>
+            <div class="message-input-area">
+                <form class="chat-form" id="message-form">
+                    <input type="text" id="message-input" placeholder="Type a message..." disabled />
+                    <input type="file" id="file-input" style="display: none;" />
+                    <button type="button" id="attach-button" disabled>📎</button>
+                    <button type="submit" id="send-button" disabled>Send</button>
+                </form>
+            </div>
+            <div class="shared-files" id="shared-files">
+                <!-- Files will be listed here -->
+            </div>
         </main>
     </div>
 
@@ -222,13 +267,18 @@
             
             const infoDiv = document.createElement('div');
             infoDiv.classList.add('message-info');
-            
-            // Format timestamp
-            const timestamp = message.created_at ? formatTime(message.created_at) : formatTime(new Date().toISOString());
-            infoDiv.textContent = `${message.sender_name} • ${timestamp}`;
+            infoDiv.textContent = `${message.sender_name} • ${formatTime(message.created_at)}`;
             
             const contentDiv = document.createElement('div');
-            contentDiv.textContent = message.content;
+            if (message.message_type === 'file') {
+                const fileLink = document.createElement('a');
+                fileLink.href = `/api/messages/${message.id}/file`;
+                fileLink.download = message.file_name;
+                fileLink.textContent = `📎 ${message.file_name}`;
+                contentDiv.appendChild(fileLink);
+            } else {
+                contentDiv.textContent = message.content;
+            }
             
             messageDiv.appendChild(infoDiv);
             messageDiv.appendChild(contentDiv);
@@ -270,6 +320,8 @@
 
         // Function to switch channels
         async function switchChannel(channel) {
+            if (!channel || !currentUser) return;
+            
             // Remove active class from current channel
             const currentActive = channelsContainer.querySelector('.active');
             if (currentActive) currentActive.classList.remove('active');
@@ -293,37 +345,38 @@
             
             // Connect to WebSocket for new channel
             connectWebSocket(channel.id);
+
+            // Load channel files
+            await loadChannelFiles();
         }
 
         // Function to send a message
-        async function sendMessage(content) {
-            if (!currentUser || !currentChannel || !content.trim()) return;
+        async function sendMessage(content, type = 'text', fileName = null, fileData = null) {
+            if (!currentUser || !currentChannel) return;
             
             try {
+                const messageData = {
+                    sender_id: currentUser.id,
+                    channel_id: currentChannel.id,
+                    content: content,
+                    message_type: type,
+                    file_name: fileName,
+                    file_data: fileData
+                };
+
                 const response = await fetch('/api/messages', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                     },
-                    body: JSON.stringify({
-                        sender_id: currentUser.id,
-                        channel_id: currentChannel.id,
-                        content: content
-                    }),
+                    body: JSON.stringify(messageData)
                 });
                 
                 if (!response.ok) throw new Error('Failed to send message');
                 
-                // Create and add the message to UI immediately
-                const newMessage = {
-                    sender_id: currentUser.id,
-                    sender_name: currentUser.name,
-                    content: content,
-                    created_at: new Date().toISOString()
-                };
-                addMessage(newMessage);
-                
+                // Clear inputs after successful send
                 messageInput.value = '';
+                document.getElementById('file-input').value = '';
             } catch (error) {
                 console.error('Error sending message:', error);
             }
@@ -331,9 +384,15 @@
 
         // Function to handle user login
         async function login(username) {
-            if (!username.trim()) return;
+            console.log('Login function called with username:', username);
+            
+            if (!username.trim()) {
+                alert('Please enter a username');
+                return;
+            }
             
             try {
+                console.log('Making login request...');
                 const response = await fetch('/api/login', {
                     method: 'POST',
                     headers: {
@@ -341,58 +400,67 @@
                     },
                     body: JSON.stringify({
                         name: username
-                    }),
+                    })
                 });
                 
+                console.log('Got response:', response.status);
+                const data = await response.json();
+                console.log('Response data:', data);
+                
                 if (!response.ok) {
-                    throw new Error('User not found');
+                    throw new Error(data.detail || 'Login failed');
                 }
                 
-                const userData = await response.json();
-                currentUser = userData;
+                console.log('Login successful, user data:', data);
+                
+                // Store user data
+                currentUser = data;
                 
                 // Update UI
                 userInfo.style.display = 'block';
                 loginArea.style.display = 'none';
                 userName.textContent = currentUser.name;
-                teamName.textContent = `Team ${currentUser.team_id}`;
+                teamName.textContent = currentUser.team_name || 'No Team';
+                
+                // Enable message controls
                 messageInput.disabled = false;
                 sendButton.disabled = false;
+                document.getElementById('attach-button').disabled = false;
                 
                 // Setup channels
                 channelsContainer.innerHTML = '';
-                userData.channels.forEach(channel => {
+                currentUser.channels.forEach(channel => {
                     const channelDiv = createChannelElement(channel);
                     channelDiv.dataset.channelId = channel.id;
                     channelsContainer.appendChild(channelDiv);
                 });
                 
-                // Switch to first channel
-                if (userData.channels.length > 0) {
-                    switchChannel(userData.channels[0]);
+                // Switch to first channel if available
+                if (currentUser.channels.length > 0) {
+                    await switchChannel(currentUser.channels[0]);
                 }
             } catch (error) {
-                console.error('Error logging in:', error);
-                alert('User not found');
+                console.error('Login error:', error);
+                alert('Login failed: ' + (error.message || 'Unknown error'));
             }
         }
 
         // Function to connect to WebSocket
         function connectWebSocket(channelId) {
+            if (!currentUser) return;
+            
             // Close existing socket for this channel if it exists
             if (sockets[channelId]) {
                 sockets[channelId].close();
                 delete sockets[channelId];
             }
             
-            const socket = new WebSocket(`ws://${window.location.host}/ws/${channelId}/${currentUser.id}`);
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const socket = new WebSocket(`${wsProtocol}//${window.location.host}/ws/${channelId}/${currentUser.id}`);
             
             socket.onmessage = function(event) {
                 const message = JSON.parse(event.data);
-                // Only add messages from other users (our own messages are added immediately after sending)
-                if (message.sender_id !== currentUser.id) {
-                    addMessage(message);
-                }
+                addMessage(message);
             };
             
             socket.onerror = function(error) {
@@ -414,24 +482,128 @@
             sockets[channelId] = socket;
         }
 
-        // Event listeners
-        messageForm.addEventListener('submit', function(e) {
+        // Add file upload handling
+        async function uploadFile(file) {
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            try {
+                const response = await fetch(`/api/channels/${currentChannel.id}/upload`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                if (!response.ok) throw new Error('Upload failed');
+                
+                loadChannelFiles();
+            } catch (error) {
+                console.error('Error uploading file:', error);
+            }
+        }
+
+        async function loadChannelFiles() {
+            try {
+                const response = await fetch(`/api/channels/${currentChannel.id}/files`);
+                const files = await response.json();
+                
+                const filesContainer = document.getElementById('shared-files');
+                filesContainer.innerHTML = '<h3>Shared Files</h3>';
+                
+                files.forEach(file => {
+                    const fileDiv = document.createElement('div');
+                    fileDiv.classList.add('file-item');
+                    fileDiv.innerHTML = `
+                        <span>${file.filename}</span>
+                        <a href="/api/files/${file.id}" download>Download</a>
+                    `;
+                    filesContainer.appendChild(fileDiv);
+                });
+            } catch (error) {
+                console.error('Error loading files:', error);
+            }
+        }
+
+        // Add event listeners for file upload
+        document.getElementById('upload-button').addEventListener('click', () => {
+            const fileInput = document.getElementById('file-input');
+            if (fileInput.files.length > 0) {
+                uploadFile(fileInput.files[0]);
+            }
+        });
+
+        document.getElementById('file-input').addEventListener('change', (e) => {
+            document.getElementById('upload-button').disabled = e.target.files.length === 0;
+        });
+
+        // Function to handle file selection
+        async function handleFileSelect(file) {
+            const reader = new FileReader();
+            reader.onload = async function(e) {
+                const base64Data = e.target.result.split(',')[1];
+                await sendMessage(base64Data, 'file', file.name);
+            };
+            reader.readAsDataURL(file);
+        }
+
+        // Add event listeners
+        document.getElementById('attach-button').addEventListener('click', () => {
+            document.getElementById('file-input').click();
+        });
+
+        document.getElementById('file-input').addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFileSelect(e.target.files[0]);
+                e.target.value = ''; // Reset file input
+            }
+        });
+
+        messageForm.addEventListener('submit', async function(e) {
             e.preventDefault();
             const message = messageInput.value;
-            if (message.trim()) {
-                sendMessage(message);
+            const fileInput = document.getElementById('file-input');
+            const file = fileInput.files[0];
+
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = async function(e) {
+                    const base64Data = e.target.result.split(',')[1];
+                    await sendMessage(message || '', 'file', file.name, base64Data);
+                };
+                reader.readAsDataURL(file);
+            } else if (message.trim()) {
+                await sendMessage(message);
             }
         });
         
-        loginButton.addEventListener('click', function() {
-            login(usernameInput.value);
-        });
-        
-        usernameInput.addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                login(usernameInput.value);
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log('Setting up event listeners');
+            
+            const loginButton = document.getElementById('login-button');
+            const usernameInput = document.getElementById('username-input');
+            
+            if (loginButton && usernameInput) {
+                console.log('Found login elements');
+                
+                loginButton.addEventListener('click', (e) => {
+                    console.log('Login button clicked');
+                    e.preventDefault();
+                    login(usernameInput.value);
+                });
+                
+                usernameInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        console.log('Enter key pressed');
+                        e.preventDefault();
+                        login(usernameInput.value);
+                    }
+                });
+            } else {
+                console.error('Could not find login elements!');
             }
         });
+
+        // Add debug logging for initial load
+        console.log('Chat app initialized');
 
         // Initialize
         usernameInput.focus();
