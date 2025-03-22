@@ -1,612 +1,295 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Team Chat Application</title>
-    <link rel="icon" type="image/x-icon" href="/static/favicon.ico">
+    <title>Chat Test Page</title>
     <style>
-        * {
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-            font-family: Arial, sans-serif;
-        }
         body {
-            display: flex;
-            height: 100vh;
-            background-color: #f5f5f5;
-        }
-        .container {
-            display: flex;
-            width: 100%;
-            max-width: 1200px;
+            font-family: Arial, sans-serif;
+            max-width: 800px;
             margin: 20px auto;
-            height: calc(100% - 40px);
-            border-radius: 10px;
-            overflow: hidden;
-            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-        }
-        .sidebar {
-            width: 250px;
-            background-color: #2c3e50;
-            color: white;
             padding: 20px;
-            overflow-y: auto;
-            display: flex;
-            flex-direction: column;
         }
-        .main {
-            flex-grow: 1;
-            display: flex;
-            flex-direction: column;
-            background-color: white;
-        }
-        .chat-header {
+        .section {
+            border: 1px solid #ccc;
             padding: 15px;
-            background-color: #3498db;
-            color: white;
-            text-align: center;
+            margin-bottom: 20px;
+            border-radius: 5px;
         }
-        .chat-messages {
-            flex-grow: 1;
-            padding: 20px;
+        button {
+            padding: 5px 10px;
+            margin: 5px;
+        }
+        input {
+            padding: 5px;
+            margin: 5px;
+            width: 200px;
+        }
+        #messages {
+            height: 300px;
             overflow-y: auto;
-            display: flex;
-            flex-direction: column;
+            border: 1px solid #eee;
+            padding: 10px;
+            margin: 10px 0;
         }
         .message {
-            margin-bottom: 15px;
-            padding: 10px 15px;
-            border-radius: 10px;
-            max-width: 70%;
-            word-wrap: break-word;
-            align-self: flex-start;
-        }
-        .message.received {
-            background-color: #e9e9e9;
-        }
-        .message.sent {
-            background-color: #4CAF50;
-            color: white;
-            align-self: flex-end;
-        }
-        .message-info {
-            font-size: 0.8rem;
-            color: #666;
-            margin-bottom: 5px;
-        }
-        .message.sent .message-info {
-            color: #e0e0e0;
-        }
-        .chat-form {
-            display: flex;
-            padding: 15px;
-            border-top: 1px solid #e9e9e9;
-        }
-        .chat-form input {
-            flex-grow: 1;
-            padding: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-            margin-right: 10px;
-        }
-        .chat-form button {
-            padding: 10px 20px;
-            background-color: #3498db;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-        }
-        .chat-form button:hover {
-            background-color: #2980b9;
-        }
-        .login-area {
-            padding: 20px;
-            margin-top: auto;
-        }
-        .login-area input {
-            width: 100%;
-            padding: 10px;
-            margin-bottom: 10px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
-        }
-        .login-area button {
-            width: 100%;
-            padding: 10px;
-            background-color: #3498db;
-            color: white;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-        }
-        .login-area button:hover {
-            background-color: #2980b9;
-        }
-        .channels-list {
-            flex-grow: 1;
-            margin-bottom: 20px;
-            overflow-y: auto;
-        }
-        .channels-list h3 {
-            margin-bottom: 15px;
-            font-size: 1.2rem;
-        }
-        .channel-item {
-            padding: 8px 12px;
-            margin-bottom: 5px;
-            border-radius: 5px;
-            cursor: pointer;
-            transition: background-color 0.2s;
-        }
-        .channel-item:hover {
-            background-color: #34495e;
-        }
-        .channel-item.active {
-            background-color: #3498db;
-        }
-        .user-info {
-            padding: 10px 0;
-            border-bottom: 1px solid #34495e;
-            margin-bottom: 15px;
-        }
-        .file-upload-area {
-            padding: 10px;
-            border-top: 1px solid #e9e9e9;
-        }
-        
-        .shared-files {
-            padding: 10px;
-            max-height: 200px;
-            overflow-y: auto;
-            border-top: 1px solid #e9e9e9;
-        }
-        
-        .file-item {
-            display: flex;
-            justify-content: space-between;
+            margin: 5px 0;
             padding: 5px;
-            border-bottom: 1px solid #eee;
+            background: #f0f0f0;
         }
-        .message a {
-            color: inherit;
-            text-decoration: underline;
+        #channels {
+            margin: 10px 0;
         }
-
-        #attach-button {
-            padding: 10px 15px;
-            margin-right: 5px;
-            background-color: #3498db;
-            color: white;
-            border: none;
-            border-radius: 5px;
+        .channel {
             cursor: pointer;
+            padding: 5px;
+            margin: 2px 0;
+            background: #eee;
         }
-
-        #attach-button:disabled {
-            background-color: #ccc;
-            cursor: not-allowed;
+        .channel.active {
+            background: #ddd;
+        }
+        .hidden {
+            display: none;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <aside class="sidebar">
-            <div class="user-info" id="user-info" style="display: none;">
-                <h3>Welcome, <span id="user-name"></span></h3>
-                <p>Team: <span id="team-name"></span></p>
-            </div>
-            <div class="channels-list">
-                <h3>Channels</h3>
-                <div id="channels-container">
-                    <!-- Channels will be populated here -->
-                </div>
-            </div>
-            <div class="login-area" id="login-area">
-                <h3>Login</h3>
-                <input type="text" id="username-input" placeholder="Enter your name" />
-                <button id="login-button">Login</button>
-            </div>
-        </aside>
-        <main class="main">
-            <div class="chat-header">
-                <h2 id="channel-header">Select a Channel</h2>
-            </div>
-            <div class="chat-messages" id="messages-container">
-                <!-- Messages will be populated here -->
-            </div>
-            <div class="message-input-area">
-                <form class="chat-form" id="message-form">
-                    <input type="text" id="message-input" placeholder="Type a message..." disabled />
-                    <input type="file" id="file-input" style="display: none;" />
-                    <button type="button" id="attach-button" disabled>📎</button>
-                    <button type="submit" id="send-button" disabled>Send</button>
-                </form>
-            </div>
-            <div class="shared-files" id="shared-files">
-                <!-- Files will be listed here -->
-            </div>
-        </main>
+    <div class="section" id="loginSection">
+        <h2>Login Test</h2>
+        <input type="text" id="username" placeholder="Enter username (e.g., Student 1)">
+        <button onclick="login()">Login</button>
+    </div>
+
+    <div class="section hidden" id="chatSection">
+        <h2>Chat Test</h2>
+        <div>Logged in as: <span id="userDisplay"></span></div>
+        <div>Team: <span id="teamDisplay"></span></div>
+        
+        <h3>Channels</h3>
+        <div id="channels"></div>
+        
+        <h3>Messages</h3>
+        <div id="messages"></div>
+        
+        <div>
+            <input type="text" id="messageInput" placeholder="Type a message">
+            <button onclick="sendMessage()">Send</button>
+        </div>
+        
+        <div>
+            <input type="file" id="fileInput">
+            <button onclick="sendFile()">Send File</button>
+        </div>
     </div>
 
     <script>
-        // Global variables
         let currentUser = null;
         let currentChannel = null;
-        let sockets = {};
-        
-        // DOM elements
-        const messagesContainer = document.getElementById('messages-container');
-        const channelsContainer = document.getElementById('channels-container');
-        const messageForm = document.getElementById('message-form');
-        const messageInput = document.getElementById('message-input');
-        const sendButton = document.getElementById('send-button');
-        const usernameInput = document.getElementById('username-input');
-        const loginButton = document.getElementById('login-button');
-        const userInfo = document.getElementById('user-info');
-        const loginArea = document.getElementById('login-area');
-        const userName = document.getElementById('user-name');
-        const teamName = document.getElementById('team-name');
-        const channelHeader = document.getElementById('channel-header');
+        let socket = null;
 
-        // Function to format timestamps
-        function formatTime(timestamp) {
-            const date = new Date(timestamp);
-            return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        }
+        // Login function
+        async function login() {
+            const username = document.getElementById('username').value;
+            try {
+                const response = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name: username })
+                });
 
-        // Function to create a message element
-        function createMessageElement(message) {
-            const isSent = currentUser && message.sender_id === currentUser.id;
-            
-            const messageDiv = document.createElement('div');
-            messageDiv.classList.add('message');
-            messageDiv.classList.add(isSent ? 'sent' : 'received');
-            
-            const infoDiv = document.createElement('div');
-            infoDiv.classList.add('message-info');
-            infoDiv.textContent = `${message.sender_name} • ${formatTime(message.created_at)}`;
-            
-            const contentDiv = document.createElement('div');
-            if (message.message_type === 'file') {
-                const fileLink = document.createElement('a');
-                fileLink.href = `/api/messages/${message.id}/file`;
-                fileLink.download = message.file_name;
-                fileLink.textContent = `📎 ${message.file_name}`;
-                contentDiv.appendChild(fileLink);
-            } else {
-                contentDiv.textContent = message.content;
+                if (!response.ok) throw new Error('Login failed');
+                
+                const userData = await response.json();
+                currentUser = userData;
+                
+                // Update UI
+                document.getElementById('loginSection').classList.add('hidden');
+                document.getElementById('chatSection').classList.remove('hidden');
+                document.getElementById('userDisplay').textContent = userData.name;
+                document.getElementById('teamDisplay').textContent = userData.team_name || 'No Team';
+                
+                // Setup channels
+                setupChannels(userData.channels);
+                
+                console.log('Login successful:', userData);
+            } catch (error) {
+                console.error('Login error:', error);
+                alert('Login failed: ' + error.message);
             }
-            
-            messageDiv.appendChild(infoDiv);
-            messageDiv.appendChild(contentDiv);
-            
-            return messageDiv;
         }
 
-        // Function to add a message to the chat
-        function addMessage(message) {
-            const messageElement = createMessageElement(message);
-            messagesContainer.appendChild(messageElement);
-            messagesContainer.scrollTop = messagesContainer.scrollHeight;
+        // Setup channels
+        function setupChannels(channels) {
+            const channelsDiv = document.getElementById('channels');
+            channelsDiv.innerHTML = '';
+            
+            channels.forEach(channel => {
+                const div = document.createElement('div');
+                div.className = 'channel';
+                div.textContent = channel.name;
+                div.onclick = () => switchChannel(channel);
+                channelsDiv.appendChild(div);
+            });
+
+            // Auto-select first channel
+            if (channels.length > 0) {
+                switchChannel(channels[0]);
+            }
         }
 
-        // Function to load messages for a channel
+        // Switch channel
+        async function switchChannel(channel) {
+            currentChannel = channel;
+            
+            // Update UI
+            document.querySelectorAll('.channel').forEach(div => {
+                div.classList.remove('active');
+                if (div.textContent === channel.name) {
+                    div.classList.add('active');
+                }
+            });
+
+            // Load messages
+            await loadMessages(channel.id);
+            
+            // Connect WebSocket
+            connectWebSocket(channel.id);
+        }
+
+        // Load messages
         async function loadMessages(channelId) {
             try {
                 const response = await fetch(`/api/channels/${channelId}/messages`);
                 const messages = await response.json();
                 
-                messagesContainer.innerHTML = '';
-                messages.forEach(addMessage);
+                const messagesDiv = document.getElementById('messages');
+                messagesDiv.innerHTML = '';
+                
+                messages.forEach(message => {
+                    addMessageToUI(message);
+                });
             } catch (error) {
                 console.error('Error loading messages:', error);
             }
         }
 
-        // Function to create channel element
-        function createChannelElement(channel, isActive = false) {
-            const channelDiv = document.createElement('div');
-            channelDiv.classList.add('channel-item');
-            if (isActive) channelDiv.classList.add('active');
-            channelDiv.textContent = channel.name;
+        // Add message to UI
+        function addMessageToUI(message) {
+            const messagesDiv = document.getElementById('messages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = 'message';
             
-            channelDiv.addEventListener('click', () => switchChannel(channel));
-            
-            return channelDiv;
-        }
-
-        // Function to switch channels
-        async function switchChannel(channel) {
-            if (!channel || !currentUser) return;
-            
-            // Remove active class from current channel
-            const currentActive = channelsContainer.querySelector('.active');
-            if (currentActive) currentActive.classList.remove('active');
-            
-            // Close existing socket for previous channel
-            if (currentChannel && sockets[currentChannel.id]) {
-                sockets[currentChannel.id].close();
-                delete sockets[currentChannel.id];
+            if (message.message_type === 'file') {
+                messageDiv.innerHTML = `
+                    ${message.sender_name}: 
+                    <a href="/api/messages/${message.id}/file" download>${message.file_name}</a>
+                `;
+            } else {
+                messageDiv.textContent = `${message.sender_name}: ${message.content}`;
             }
             
-            // Update current channel and UI
-            currentChannel = channel;
-            channelHeader.textContent = channel.name;
-            
-            // Add active class to new channel
-            const channelElement = channelsContainer.querySelector(`[data-channel-id="${channel.id}"]`);
-            if (channelElement) channelElement.classList.add('active');
-            
-            // Load messages for new channel
-            await loadMessages(channel.id);
-            
-            // Connect to WebSocket for new channel
-            connectWebSocket(channel.id);
-
-            // Load channel files
-            await loadChannelFiles();
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
         }
 
-        // Function to send a message
-        async function sendMessage(content, type = 'text', fileName = null, fileData = null) {
+        // Send message
+        async function sendMessage() {
             if (!currentUser || !currentChannel) return;
             
+            const input = document.getElementById('messageInput');
+            const content = input.value.trim();
+            if (!content) return;
+            
             try {
-                const messageData = {
-                    sender_id: currentUser.id,
-                    channel_id: currentChannel.id,
-                    content: content,
-                    message_type: type,
-                    file_name: fileName,
-                    file_data: fileData
-                };
-
                 const response = await fetch('/api/messages', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify(messageData)
-                });
-                
-                if (!response.ok) throw new Error('Failed to send message');
-                
-                // Clear inputs after successful send
-                messageInput.value = '';
-                document.getElementById('file-input').value = '';
-            } catch (error) {
-                console.error('Error sending message:', error);
-            }
-        }
-
-        // Function to handle user login
-        async function login(username) {
-            console.log('Login function called with username:', username);
-            
-            if (!username.trim()) {
-                alert('Please enter a username');
-                return;
-            }
-            
-            try {
-                console.log('Making login request...');
-                const response = await fetch('/api/login', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
+                    headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        name: username
+                        content,
+                        channel_id: currentChannel.id,
+                        sender_id: currentUser.id
                     })
                 });
                 
-                console.log('Got response:', response.status);
-                const data = await response.json();
-                console.log('Response data:', data);
-                
-                if (!response.ok) {
-                    throw new Error(data.detail || 'Login failed');
-                }
-                
-                console.log('Login successful, user data:', data);
-                
-                // Store user data
-                currentUser = data;
-                
-                // Update UI
-                userInfo.style.display = 'block';
-                loginArea.style.display = 'none';
-                userName.textContent = currentUser.name;
-                teamName.textContent = currentUser.team_name || 'No Team';
-                
-                // Enable message controls
-                messageInput.disabled = false;
-                sendButton.disabled = false;
-                document.getElementById('attach-button').disabled = false;
-                
-                // Setup channels
-                channelsContainer.innerHTML = '';
-                currentUser.channels.forEach(channel => {
-                    const channelDiv = createChannelElement(channel);
-                    channelDiv.dataset.channelId = channel.id;
-                    channelsContainer.appendChild(channelDiv);
-                });
-                
-                // Switch to first channel if available
-                if (currentUser.channels.length > 0) {
-                    await switchChannel(currentUser.channels[0]);
-                }
+                if (!response.ok) throw new Error('Failed to send message');
+                input.value = '';
             } catch (error) {
-                console.error('Login error:', error);
-                alert('Login failed: ' + (error.message || 'Unknown error'));
+                console.error('Error sending message:', error);
+                alert('Failed to send message');
             }
         }
 
-        // Function to connect to WebSocket
-        function connectWebSocket(channelId) {
-            if (!currentUser) return;
+        // Send file
+        async function sendFile() {
+            if (!currentUser || !currentChannel) return;
             
-            // Close existing socket for this channel if it exists
-            if (sockets[channelId]) {
-                sockets[channelId].close();
-                delete sockets[channelId];
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+            if (!file) return;
+            
+            try {
+                const reader = new FileReader();
+                reader.onload = async (e) => {
+                    const base64Data = e.target.result.split(',')[1];
+                    
+                    const response = await fetch('/api/messages', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            content: '',
+                            channel_id: currentChannel.id,
+                            sender_id: currentUser.id,
+                            message_type: 'file',
+                            file_name: file.name,
+                            file_data: base64Data
+                        })
+                    });
+                    
+                    if (!response.ok) throw new Error('Failed to send file');
+                    fileInput.value = '';
+                };
+                reader.readAsDataURL(file);
+            } catch (error) {
+                console.error('Error sending file:', error);
+                alert('Failed to send file');
+            }
+        }
+
+        // WebSocket connection
+        function connectWebSocket(channelId) {
+            if (socket) {
+                socket.close();
             }
             
-            const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            const socket = new WebSocket(`${wsProtocol}//${window.location.host}/ws/${channelId}/${currentUser.id}`);
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            socket = new WebSocket(`${protocol}//${window.location.host}/ws/${channelId}/${currentUser.id}`);
             
-            socket.onmessage = function(event) {
+            socket.onmessage = (event) => {
                 const message = JSON.parse(event.data);
-                addMessage(message);
+                addMessageToUI(message);
             };
             
-            socket.onerror = function(error) {
-                console.error(`WebSocket error:`, error);
+            socket.onerror = (error) => {
+                console.error('WebSocket error:', error);
             };
             
-            socket.onclose = function() {
-                console.log(`Channel ${channelId} connection closed`);
-                delete sockets[channelId];
-                
-                // Try to reconnect after a delay if this is still the current channel
+            socket.onclose = () => {
                 setTimeout(() => {
                     if (currentChannel && currentChannel.id === channelId) {
                         connectWebSocket(channelId);
                     }
                 }, 5000);
             };
-            
-            sockets[channelId] = socket;
         }
 
-        // Add file upload handling
-        async function uploadFile(file) {
-            const formData = new FormData();
-            formData.append('file', file);
-            
-            try {
-                const response = await fetch(`/api/channels/${currentChannel.id}/upload`, {
-                    method: 'POST',
-                    body: formData
-                });
-                
-                if (!response.ok) throw new Error('Upload failed');
-                
-                loadChannelFiles();
-            } catch (error) {
-                console.error('Error uploading file:', error);
-            }
-        }
-
-        async function loadChannelFiles() {
-            try {
-                const response = await fetch(`/api/channels/${currentChannel.id}/files`);
-                const files = await response.json();
-                
-                const filesContainer = document.getElementById('shared-files');
-                filesContainer.innerHTML = '<h3>Shared Files</h3>';
-                
-                files.forEach(file => {
-                    const fileDiv = document.createElement('div');
-                    fileDiv.classList.add('file-item');
-                    fileDiv.innerHTML = `
-                        <span>${file.filename}</span>
-                        <a href="/api/files/${file.id}" download>Download</a>
-                    `;
-                    filesContainer.appendChild(fileDiv);
-                });
-            } catch (error) {
-                console.error('Error loading files:', error);
-            }
-        }
-
-        // Add event listeners for file upload
-        document.getElementById('upload-button').addEventListener('click', () => {
-            const fileInput = document.getElementById('file-input');
-            if (fileInput.files.length > 0) {
-                uploadFile(fileInput.files[0]);
-            }
-        });
-
-        document.getElementById('file-input').addEventListener('change', (e) => {
-            document.getElementById('upload-button').disabled = e.target.files.length === 0;
-        });
-
-        // Function to handle file selection
-        async function handleFileSelect(file) {
-            const reader = new FileReader();
-            reader.onload = async function(e) {
-                const base64Data = e.target.result.split(',')[1];
-                await sendMessage(base64Data, 'file', file.name);
-            };
-            reader.readAsDataURL(file);
-        }
-
-        // Add event listeners
-        document.getElementById('attach-button').addEventListener('click', () => {
-            document.getElementById('file-input').click();
-        });
-
-        document.getElementById('file-input').addEventListener('change', (e) => {
-            if (e.target.files.length > 0) {
-                handleFileSelect(e.target.files[0]);
-                e.target.value = ''; // Reset file input
-            }
-        });
-
-        messageForm.addEventListener('submit', async function(e) {
-            e.preventDefault();
-            const message = messageInput.value;
-            const fileInput = document.getElementById('file-input');
-            const file = fileInput.files[0];
-
-            if (file) {
-                const reader = new FileReader();
-                reader.onload = async function(e) {
-                    const base64Data = e.target.result.split(',')[1];
-                    await sendMessage(message || '', 'file', file.name, base64Data);
-                };
-                reader.readAsDataURL(file);
-            } else if (message.trim()) {
-                await sendMessage(message);
-            }
+        // Add Enter key handler for login and message input
+        document.getElementById('username').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') login();
         });
         
-        document.addEventListener('DOMContentLoaded', () => {
-            console.log('Setting up event listeners');
-            
-            const loginButton = document.getElementById('login-button');
-            const usernameInput = document.getElementById('username-input');
-            
-            if (loginButton && usernameInput) {
-                console.log('Found login elements');
-                
-                loginButton.addEventListener('click', (e) => {
-                    console.log('Login button clicked');
-                    e.preventDefault();
-                    login(usernameInput.value);
-                });
-                
-                usernameInput.addEventListener('keypress', (e) => {
-                    if (e.key === 'Enter') {
-                        console.log('Enter key pressed');
-                        e.preventDefault();
-                        login(usernameInput.value);
-                    }
-                });
-            } else {
-                console.error('Could not find login elements!');
-            }
+        document.getElementById('messageInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
         });
-
-        // Add debug logging for initial load
-        console.log('Chat app initialized');
-
-        // Initialize
-        usernameInput.focus();
     </script>
 </body>
 </html>

@@ -37,8 +37,8 @@ templates = Jinja2Templates(directory="templates")
 # Database configuration
 DB_CONFIG = {
     "dbname": "chat_db",
-    "user": "ashik",
-    "password": "ashik",
+    "user": "postgres",
+    "password": "postgres",
     "host": "localhost"
 }
 
