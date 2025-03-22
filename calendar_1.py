@@ -15,7 +15,14 @@ app = FastAPI()
 def read_root():
     return {"message": "Hello, World!"}
 
-
+def resolveUserToken(token):
+    # for now, return the token as is
+    # TODO: implement token resolution and figure out how you plan on storing the user related info in the page
+    return token
+''' resolve userid
+teamid
+role
+'''
 class EventBase(BaseModel):
     """Base model for event data matching react-scheduler format"""
     event_id: Optional[int] = None
@@ -88,7 +95,13 @@ def create_event(event_data: EventCreate) -> Dict[str, Any]:
     try:
         # Create event document
         event_doc = event_data.dict()
+
+        if event_doc.get("type") == "global" and role != "prof":
+            raise HTTPException(status_code=403, detail="Only professors can create global events")
         
+        if "type" not in event_doc:
+            event_doc["type"] = "personal"
+
         # Generate event_id if not provided
         if not event_doc.get("event_id"):
             # Get highest existing event_id and increment
@@ -102,8 +115,6 @@ def create_event(event_data: EventCreate) -> Dict[str, Any]:
                 
             event_doc["event_id"] = next_id
         
-        # Add created timestamp
-        event_doc["created_at"] = datetime.now(timezone.utc).isoformat()
         #event_doc["_id"]=str(event_doc["_id"])
         
         # Insert into MongoDB
@@ -135,9 +146,13 @@ def update_event(event_id: int, user_id: str, event_data: Dict[str, Any]) -> Dic
     try:
         # Remove any fields that are None
         update_data = {k: v for k, v in event_data.items() if v is not None}
-        
-        # Add updated timestamp
-        update_data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+        role = resolveUserToken(token)
+        # Query condition: Allow update if user is a professor or if type is personal
+        query = {
+            "event_id": event_id,
+            "$or": [{"type": "personal"}, {"role": "prof"}]
+        }
         
         # Find and update the event
         result = events_collection.find_one_and_update(
