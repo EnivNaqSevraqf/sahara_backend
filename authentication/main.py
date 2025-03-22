@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Database and ORM Setup
 # ----------------------------
 # Update with your PostgreSQL credentials - the default username is usually "postgres"
-SQLALCHEMY_DATABASE_URL = "postgresql://postgres:hello123@localhost/maindb"
+SQLALCHEMY_DATABASE_URL = "postgresql://avnadmin:AVNS_DkrVvzHCnOiMVJwagav@pg-8b6fabf-sahara-team-8.f.aivencloud.com:17950/defaultdb"
 
 # Add debug prints to diagnose database connection issues
 try:
