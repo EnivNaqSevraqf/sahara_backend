@@ -22,7 +22,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Database and ORM Setup
 # ----------------------------
 # Update with your PostgreSQL credentials - the default username is usually "postgres"
-SQLALCHEMY_DATABASE_URL = "postgresql://postgres:hello123@localhost/maindb"
+SQLALCHEMY_DATABASE_URL = "postgresql://avnadmin:AVNS_DkrVvzHCnOiMVJwagav@pg-8b6fabf-sahara-team-8.f.aivencloud.com:17950/defaultdb"
 
 # Add debug prints to diagnose database connection issues
 try:
@@ -79,11 +79,6 @@ class UserInDB(UserBase):
 class LoginRequest(BaseModel):
     username: str
     password: str
-
-class ExtendedLoginRequest(BaseModel):
-    username: str
-    password: str
-    role: str
 
 class ResetPasswordAfterOTPRequest(BaseModel):
     new_password: str
@@ -202,23 +197,27 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 def get_verified_user(token: str = Depends(oauth2_scheme)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        email = payload.get("sub")
-        role = payload.get("role")
-        if email is None or role is None:
+        username = payload.get("sub")
+        if username is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
-        return {"email": email, "role": role}
+        return {"username": username}
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has expired")
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
 
 # Rename admin_required to prof_required and update logic
-def prof_required(token: str = Depends(oauth2_scheme)):
+def prof_required(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        role = payload.get("role")
-        if role != "prof":
+        username = payload.get("sub")
+        if not username:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
+            
+        # Check if user is a professor
+        prof = db.query(Prof).filter(Prof.username == username).first()
+        if not prof:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized, professor access required")
         return payload
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
@@ -233,21 +232,28 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
-        role: str = payload.get("role")
-        if username is None or role is None:
+        if username is None:
             raise credentials_exception
     except jwt.PyJWTError:
         raise credentials_exception
     
-    # Query the appropriate table based on the role
-    if role == "prof":  # Changed from ["prof", "admin"]
-        user = db.query(Prof).filter(Prof.username == username).first()
-    elif role == "student":
-        user = db.query(Student).filter(Student.username == username).first()
-    elif role == "ta":
-        user = db.query(TA).filter(TA.username == username).first()
-    else:
-        raise credentials_exception
+    # Check all tables to find the user
+    prof = db.query(Prof).filter(Prof.username == username).first()
+    student = db.query(Student).filter(Student.username == username).first()
+    ta = db.query(TA).filter(TA.username == username).first()
+    
+    user = None
+    role = None
+    
+    if prof:
+        user = prof
+        role = "prof"
+    elif student:
+        user = student
+        role = "student"
+    elif ta:
+        user = ta
+        role = "ta"
     
     if user is None:
         raise credentials_exception
@@ -260,23 +266,33 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
 # ----------------------------
 
 @app.post("/login")
-def login(request: ExtendedLoginRequest, db: Session = Depends(get_db)):
-    role = request.role.lower()
-    if role == "prof":  # Changed from role in ["prof", "admin"]
-        user = db.query(Prof).filter(Prof.username == request.username).first()
-    elif role == "student":
-        user = db.query(Student).filter(Student.username == request.username).first()
-    elif role == "ta":
-        user = db.query(TA).filter(TA.username == request.username).first()
-    else:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid role provided")
-
-    # Verify credentials.
+def login(request: LoginRequest, db: Session = Depends(get_db)):
+    # Check all tables to find the user
+    prof = db.query(Prof).filter(Prof.username == request.username).first()
+    student = db.query(Student).filter(Student.username == request.username).first()
+    ta = db.query(TA).filter(TA.username == request.username).first()
+    
+    user = None
+    role = None
+    
+    if prof:
+        user = prof
+        role = "prof"
+    elif student:
+        user = student
+        role = "student"
+    elif ta:
+        user = ta
+        role = "ta"
+    
+    # Verify credentials
     if not user or not verify_password(request.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
-    token = generate_token({"sub": user.username, "role": role}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    return {"access_token": token, "token_type": "bearer"}
+    # Generate token with only username in the payload
+    token = generate_token({"sub": user.username}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    # Return token and role separately
+    return {"access_token": token, "token_type": "bearer", "role": role}
 
 # Update the reset_password function
 @app.post("/reset-password")
@@ -315,9 +331,12 @@ def create_prof(
     # Extract username from email (characters before @)
     username = request.email.split('@')[0]
     
-    # Check if username already exists
-    existing_user = db.query(Prof).filter(Prof.username == username).first()
-    if existing_user:
+    # Check if username already exists in ANY table for uniqueness
+    existing_prof = db.query(Prof).filter(Prof.username == username).first()
+    existing_student = db.query(Student).filter(Student.username == username).first()
+    existing_ta = db.query(TA).filter(TA.username == username).first()
+    
+    if existing_prof or existing_student or existing_ta:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, 
             detail=f"Username {username} already exists"
@@ -384,9 +403,12 @@ async def upload_students(
             try:
                 username = student['Username']
                 
-                # Check if username already exists
-                existing_user = db.query(Student).filter(Student.username == username).first()
-                if existing_user:
+                # Check if username already exists in ANY table for uniqueness
+                existing_prof = db.query(Prof).filter(Prof.username == username).first()
+                existing_student = db.query(Student).filter(Student.username == username).first()
+                existing_ta = db.query(TA).filter(TA.username == username).first()
+                
+                if existing_prof or existing_student or existing_ta:
                     errors.append(f"Username {username} already exists")
                     continue
                 
@@ -467,9 +489,12 @@ async def upload_tas(
             try:
                 username = ta['Username']
                 
-                # Check if username already exists
-                existing_user = db.query(TA).filter(TA.username == username).first()
-                if existing_user:
+                # Check if username already exists in ANY table for uniqueness
+                existing_prof = db.query(Prof).filter(Prof.username == username).first()
+                existing_student = db.query(Student).filter(Student.username == username).first()
+                existing_ta = db.query(TA).filter(TA.username == username).first()
+                
+                if existing_prof or existing_student or existing_ta:
                     errors.append(f"Username {username} already exists")
                     continue
                 
