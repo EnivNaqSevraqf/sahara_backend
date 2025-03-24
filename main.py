@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, Response, Form
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table
@@ -23,6 +23,11 @@ import traceback
 from typing import Optional, List
 import sys
 import importlib.util
+from typing import Optional, List, Annotated
+import shutil
+import uuid
+import json
+from fastapi.staticfiles import StaticFiles
 
 # Import CSV processing functions from authentication/read_csv.py
 sys.path.append(os.path.join(os.path.dirname(__file__), 'authentication'))
@@ -113,14 +118,15 @@ class Announcement(Base):
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     title = Column(String, nullable=False)
     content = Column(JSONB, nullable=False)
+    url_name = Column(String, unique=True, nullable=True)
     
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role == RoleType.STUDENT:
-            raise ValueError("Students cannot create announcements.")
-        return value
-    # content = Column(JSON)
+        with SessionLocal() as session:
+            user = session.query(User).filter_by(id=value).first()
+            if user and user.role == RoleType.STUDENT:
+                raise ValueError("Students cannot create announcements.")
+            return value
 
 
 class FormResponse(Base):
@@ -866,13 +872,120 @@ def register_temp(
 def get_gradeables():
     pass
 
-@app.post("/announcements/create") # TODO: Charan
-def create_announcement():
-    pass
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
-@app.get("/announcements/") # TODO: Spandan
-def get_announcements():
-    pass
+class Announcements(BaseModel):
+    title: str
+    description: dict
+    #file_patch: str
+
+class Show(BaseModel):
+    id: int
+    creator_id: int
+    created_at: str
+    title: str
+    content: dict
+    url_name: Optional[str] = None
+
+    class Config:
+        orm_mode = True
+
+@app.post('/announcements', status_code=status.HTTP_201_CREATED)
+async def create(
+    title: Annotated[str, Form()],
+    description: Annotated[str, Form()],
+    file: UploadFile | None = None,
+    db: Session = Depends(get_db),
+    #current_user: dict = Depends(get_current_user)
+):
+    file_location = None
+    if file:
+        file_extension = file.filename.split('.')[-1]
+        file_name = f"{uuid.uuid4()}.{file_extension}"
+        file_location = f"uploads/{file_name}"
+        with open(file_location, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+
+    try:
+        description_json = json.loads(description)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
+    
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    new_announcement = Announcement(
+        creator_id=1,
+        created_at=current_time,
+        title=title,
+        content=description_json,
+        url_name=file_location if file_location else None
+    )
+    db.add(new_announcement)
+    db.commit()
+    db.refresh(new_announcement)
+    return new_announcement
+
+
+@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
+def destroy(id:int, db:Session=Depends(get_db)):
+    blog=db.query(Announcement).filter(Announcement.id==id)
+    if not blog.first():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
+    if blog.first().url_name and os.path.exists(blog.first().url_name):  # Changed from file_path to url_name
+        os.remove(blog.first().url_name)
+    blog.delete(synchronize_session=False)
+    db.commit()
+    return 'done'
+
+@app.put('/announcements/{id}', status_code=status.HTTP_202_ACCEPTED)
+def update(
+    id: int,
+    title: Annotated[str, Form()],
+    description: Annotated[str, Form()],
+    file: UploadFile | None = None,
+    db: Session = Depends(get_db)
+):
+    announcement = db.query(Announcement).filter(Announcement.id==id)
+    if not announcement.first():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
+    
+    new_url_name = announcement.first().url_name
+    if file:
+        if announcement.first().url_name and os.path.exists(announcement.first().url_name):
+            os.remove(announcement.first().url_name)
+        
+        file_extension = file.filename.split('.')[-1]
+        file_name = f"{uuid.uuid4()}.{file_extension}"
+        new_url_name = f"uploads/{file_name}"
+        with open(new_url_name, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+    
+    try:
+        description_json = json.loads(description)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
+    
+    # Update only the modifiable fields
+    announcement.first().title = title
+    announcement.first().content = description_json
+    announcement.first().url_name = new_url_name
+
+    db.commit()
+    db.refresh(announcement.first())
+    return {"detail": "Announcement updated", "announcement": announcement.first()}
+
+@app.get('/announcements', response_model=List[Show])
+def all(db:Session = Depends(get_db)):
+    blogs = db.query(Announcement).all()
+    return blogs
+
+@app.get('/announcements/{id}', status_code=200, response_model=Show)
+def show(id, response: Response, db:Session=Depends(get_db)):
+    blog = db.query(Announcement).filter(Announcement.id==id).first()
+    if not blog:
+        response.status_code=status.HTTP_404_NOT_FOUND
+        return {'details': f'blog with {id} not found'}
+    return blog
 
 @app.post("/quiz/create")
 def create_quiz():
