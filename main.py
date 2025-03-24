@@ -109,6 +109,7 @@ class User(Base):
     team_calendar_events = relationship("TeamCalendarEvent", back_populates="creator")
     # global_calendar_events = relationship("GlobalCalendarEvent", back_populates="creator")
     skills = relationship("Skill", secondary=user_skills, back_populates="users")
+    gradeable_scores = relationship("GradeableScores", back_populates="user")
     
     @validates('skills')
     def validate_skills(self, key, skill):
