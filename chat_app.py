@@ -24,7 +24,7 @@ Base = declarative_base()
 # Create required directories
 os.makedirs("templates", exist_ok=True)
 os.makedirs("static", exist_ok=True)
-os.makedirs("uploads", exist_ok=True)
+os.makedirs("forums_uploads", exist_ok=True)
 
 # Role enum from main.py
 class RoleType(enum.Enum):
@@ -112,7 +112,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory="static"), name="static")
-app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+app.mount("/forums_uploads", StaticFiles(directory="forums_uploads"), name="forums_uploads")
 
 # Set up templates directory
 templates = Jinja2Templates(directory="templates")
@@ -310,7 +310,7 @@ async def send_message(message: MessageModel, db: Session = Depends(get_db)):
         if message.message_type == 'file' and message.file_data:
             file_data = base64.b64decode(message.file_data)
             file_name = f"{uuid.uuid4()}_{message.file_name}"
-            file_path = os.path.join("uploads", file_name)
+            file_path = os.path.join("forums_uploads", file_name)
             with open(file_path, "wb") as f:
                 f.write(file_data)
             message.content = file_name  # Store just the filename, not the full path
