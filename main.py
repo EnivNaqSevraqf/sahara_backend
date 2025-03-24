@@ -1,6 +1,6 @@
 import json
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table
 from sqlalchemy.ext.declarative import declarative_base
@@ -28,6 +28,8 @@ from typing import Optional, List, Annotated
 import shutil
 import uuid
 import json
+import csv
+from io import StringIO
 from fastapi.staticfiles import StaticFiles
 
 # Import CSV processing functions from authentication/read_csv.py
@@ -184,6 +186,7 @@ class FormResponse(Base):
     user = relationship("User", back_populates="responses")
     form = relationship("Form", back_populates="responses")
 
+
 class Gradeable(Base):
     __tablename__ = "gradeables"
     id = Column(Integer, primary_key=True)
@@ -195,6 +198,7 @@ class Gradeable(Base):
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
 
     creator = relationship("User", back_populates="gradeables")
+    scores = relationship("GradeableScores", back_populates="gradeable")
 
     @validates("creator_id")
     def validate_creator(self, key, value):
@@ -202,6 +206,17 @@ class Gradeable(Base):
         if user and user.role == RoleType.STUDENT:
             raise ValueError("Students cannot create gradeables.")
         return value
+    
+class GradeableScores(Base):
+    __tablename__ = "gradeable_scores"
+    id = Column(Integer, primary_key=True)
+    gradeable_id = Column(Integer, ForeignKey("gradeables.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    score = Column(Integer, nullable=False)
+    feedback = Column(String, nullable=True)
+
+    gradeable = relationship("Gradeable", back_populates="scores")
+    user = relationship("User", back_populates="gradeable_scores")
 
 class GlobalCalendarEvent(Base):
     __tablename__ = "global_calendar_events"
@@ -455,6 +470,27 @@ class AssignSkillsRequest(BaseModel):
 class AssignTeamSkillsRequest(BaseModel):
     team_id: int
     skill_ids: List[int]
+
+class GradeableCreateRequest(BaseModel):
+    title: str
+    description: str
+    due_date: str  # ISO 8601 format
+    max_points: int
+    
+    @validator('due_date')
+    def validate_due_date(cls, v):
+        try:
+            # Validate ISO 8601 format
+            datetime.fromisoformat(v.replace('Z', '+00:00'))
+            return v
+        except ValueError:
+            raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
+            
+    @validator('max_points')
+    def validate_max_points(cls, v):
+        if v <= 0:
+            raise ValueError("Maximum points must be greater than zero")
+        return v
 
 app = FastAPI()
 
@@ -902,7 +938,7 @@ async def upload_tas(
                 
                 # Add to successful creations
                 created_tas.append({
-                    "name": new_t_ta.name,
+                    "name": new_ta.name,
                     "email": new_ta.email,
                     "username": username,
                     "temp_password": temp_password
@@ -1649,3 +1685,295 @@ async def assign_skills_to_team(request: AssignTeamSkillsRequest, db: Session = 
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error assigning skills to team: {str(e)}")
 
+
+
+@app.get("/gradeables/")
+async def get_gradeable_table(
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """
+    Get the gradeable table for professors and TAs
+    """
+    gradeables = db.query(Gradeable).all()
+    results = []
+    for gradeable in gradeables:
+        results.append({
+            "id": gradeable.id,
+            "name": gradeable.name,
+            "description": gradeable.description,
+            "due_date": gradeable.due_date,
+            "created_at": gradeable.created_at,
+            "updated_at": gradeable.updated_at
+        })
+    return JSONResponse(status_code=200, content=results)
+
+@app.get("/gradeables/{gradeable_id}")
+async def get_gradeable_by_id(
+    gradeable_id: int,
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """
+    Get a specific gradeable by ID
+    """
+    gradeable = db.query(Gradeable).filter(Gradeable.id == gradeable_id).first()
+    if not gradeable:
+        raise HTTPException(status_code=404, detail="Gradeable not found")
+    
+    return JSONResponse(status_code=200, content={
+        "id": gradeable.id,
+        "name": gradeable.name,
+        "description": gradeable.description,
+        "due_date": gradeable.due_date,
+        "created_at": gradeable.created_at,
+        "updated_at": gradeable.updated_at
+    })
+@app.get("/gradeables/{gradeable_id}/scores")
+async def get_gradeable_submissions(
+    gradeable_id: int,
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """
+    Get all submissions for a specific gradeable
+    """
+    submissions = db.query(GradeableScores).filter(GradeableScores.gradeable_id == gradeable_id).all()
+    results = []
+    for submission in submissions:
+        results.append({
+            "id": submission.id,
+            "user_id": submission.user_id,
+            "gradeable_id": submission.gradeable_id,
+            "submitted_at": submission.submitted_at,
+            "score": submission.score
+        })
+    return JSONResponse(status_code=200, content=results)
+
+@app.get("/gradeables/{gradeable_id}/upload-scores")
+async def upload_gradeable_scores(
+    gradeable_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """
+    Upload scores for a specific gradeable
+    """
+    # Ensure the file is a CSV
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only CSV files are allowed"
+        )
+    
+    try:
+        # Read file content
+        content = await file.read()
+        content_str = content.decode('utf-8')
+        
+        # Parse CSV content
+        scores = parse_scores_from_csv(content_str)
+        
+        # Update scores in the database
+        for score in scores:
+            submission = db.query(GradeableScores).filter(
+                GradeableScores.gradeable_id == gradeable_id,
+                GradeableScores.user_id == score["user_id"]
+            ).first()
+            
+            if submission:
+                submission.score = score["score"]
+                submission.submitted_at = datetime.now(timezone.utc).isoformat()
+            else:
+                new_submission = GradeableScores(
+                    user_id=score["user_id"],
+                    gradeable_id=gradeable_id,
+                    score=score["score"],
+                    submitted_at=datetime.now(timezone.utc).isoformat()
+                )
+                db.add(new_submission)
+        
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={
+            "message": "Scores uploaded successfully",
+            "gradeable_id": gradeable_id,
+            "total_submissions": len(scores)
+        })
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error uploading scores: {str(e)}")
+
+@app.post("/gradeables/create")
+async def create_gradeable(
+    gradeable: GradeableCreateRequest,
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """
+    Create a new gradeable
+    """
+    try:
+        # Extract the token payload to get the creator ID (username)
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        user = db.query(User).filter(User.username == username).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Check if a gradeable with the same title already exists
+        existing_gradeable = db.query(Gradeable).filter(Gradeable.title == gradeable.title).first()
+        if existing_gradeable:
+            raise HTTPException(status_code=400, detail="Gradeable with this title already exists")
+        
+        # Create new gradeable
+        new_gradeable = Gradeable(
+            title=gradeable.title,
+            description=gradeable.description,
+            due_date=gradeable.due_date,
+            max_points=gradeable.max_points,
+            creator_id=user.id,
+            created_at=datetime.now(timezone.utc).isoformat()
+        )
+        
+        db.add(new_gradeable)
+        db.commit()
+        db.refresh(new_gradeable)
+        
+        return JSONResponse(status_code=201, content={
+            "id": new_gradeable.id,
+            "title": new_gradeable.title,
+            "description": new_gradeable.description,
+            "due_date": new_gradeable.due_date,
+            "max_points": new_gradeable.max_points,
+            "creator_id": new_gradeable.creator_id,
+            "created_at": new_gradeable.created_at
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating gradeable: {str(e)}")
+
+def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
+    """
+    Parse CSV content containing user scores.
+    Expected CSV format: user_id,score
+    First row should be headers.
+    
+    Also assigns a default score of 0 to any student who doesn't have a score in the CSV.
+    
+    Returns:
+        List of dictionaries with user_id and score
+    """
+    # import csv
+    # from io import StringIO
+    
+    scores = []
+    processed_user_ids = set()
+    
+    # Parse the CSV content
+    try:
+        csv_file = StringIO(csv_content)
+        csv_reader = csv.DictReader(csv_file)
+        
+        # Check required headers
+        required_headers = ['user_id', 'score']
+        headers = csv_reader.fieldnames
+        
+        if not all(header in headers for header in required_headers):
+            raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
+        
+        # Process each row
+        for row in csv_reader:
+            try:
+                user_id = int(row['user_id'])
+                score = int(row['score'])
+                
+                scores.append({
+                    'user_id': user_id,
+                    'score': score
+                })
+                processed_user_ids.add(user_id)
+            except (ValueError, KeyError) as e:
+                # Skip invalid rows but continue processing
+                print(f"Error processing row: {row}. Error: {str(e)}")
+                continue
+    
+    except Exception as e:
+        raise ValueError(f"Error parsing CSV: {str(e)}")
+    
+    # Get all students from the database and add default score of 0 for missing ones
+    with SessionLocal() as db:
+        # Get student role ID
+        student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
+        if student_role:
+            # Get all student users
+            students = db.query(User).filter(User.role_id == student_role.id).all()
+            
+            # Add default score of 0 for students not in the CSV
+            for student in students:
+                if student.id not in processed_user_ids:
+                    scores.append({
+                        'user_id': student.id,
+                        'score': 0
+                    })
+    
+    return scores
+
+@app.get("/gradeables/{gradeable_id}/upload-scores")
+async def upload_gradeable_scores(
+    gradeable_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """
+    Upload scores for a specific gradeable
+    """
+    # Ensure the file is a CSV
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Only CSV files are allowed"
+        )
+    
+    try:
+        # Read file content
+        content = await file.read()
+        content_str = content.decode('utf-8')
+        
+        # Parse CSV content
+        scores = parse_scores_from_csv(content_str)
+        
+        # Update scores in the database
+        for score in scores:
+            submission = db.query(GradeableScores).filter(
+                GradeableScores.gradeable_id == gradeable_id,
+                GradeableScores.user_id == score["user_id"]
+            ).first()
+            
+            if submission:
+                submission.score = score["score"]
+                submission.submitted_at = datetime.now(timezone.utc).isoformat()
+            else:
+                new_submission = GradeableScores(
+                    user_id=score["user_id"],
+                    gradeable_id=gradeable_id,
+                    score=score["score"],
+                    submitted_at=datetime.now(timezone.utc).isoformat()
+                )
+                db.add(new_submission)
+        
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={
+            "message": "Scores uploaded successfully",
+            "gradeable_id": gradeable_id,
+            "total_submissions": len(scores)
+        })
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error uploading scores: {str(e)}")
