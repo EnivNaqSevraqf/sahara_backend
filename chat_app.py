@@ -65,6 +65,15 @@ team_members = Table(
     Column("user_id", Integer, ForeignKey("users.id"), primary_key=True)
 )
 
+class Team_TA(Base):
+    __tablename__ = "team_tas"
+    id = Column(Integer, primary_key=True)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+    ta_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    team = relationship("Team", backref="team_tas")
+    ta = relationship("User", backref="ta_teams")
+
 # Chat-specific models
 class Channel(Base):
     __tablename__ = "channels"
@@ -116,72 +125,21 @@ def get_db():
     finally:
         db.close()
 
-def init_db():
-    """Initialize the database with required tables"""
-    Base.metadata.create_all(bind=engine)
+# def init_db():
+#     """Initialize the database with required tables"""
+#     Base.metadata.create_all(bind=engine)
     
-    # Only insert initial data if the tables are empty
-    db = SessionLocal()
-    try:
-        if db.query(Channel).count() == 0:
-            # Create only global channel
-            global_channel = Channel(name='Global Chat', type='global')
-            db.add(global_channel)
-            db.commit()
+#     # Only insert initial data if the tables are empty
+#     db = SessionLocal()
+#     try:
+#         if db.query(Channel).count() == 0:
+#             # Create only global channel
+#             global_channel = Channel(name='Global Chat', type='global')
+#             db.add(global_channel)
+#             db.commit()
 
-        # Comment out team initialization for now
-        # if db.query(Team).count() == 0:
-        #     # Insert teams
-        #     teams = [
-        #         Team(name='Team A'),
-        #         Team(name='Team B'),
-        #         Team(name='Team C')
-        #     ]
-        #     db.add_all(teams)
-        #     db.commit()
-
-        #     # Insert TAs
-        #     for i, team in enumerate(teams):
-        #         ta = User(
-        #             name=f'TA {i+1}',
-        #             email=f'ta{i+1}@example.com',
-        #             username=f'ta{i+1}',
-        #             hashed_password='password',
-        #             role_id=3,  # Assuming role_id 3 is for TA
-        #             team_id=team.id
-        #         )
-        #         db.add(ta)
-            
-        #     # Insert regular students
-        #     for team in teams:
-        #         for i in range(5):
-        #             student = User(
-        #                 name=f'Student {i+1} of {team.name}',
-        #                 email=f'student{i+1}@example.com',
-        #                 username=f'student{i+1}',
-        #                 hashed_password='password',
-        #                 role_id=2,  # Assuming role_id 2 is for Student
-        #                 team_id=team.id
-        #             )
-        #             db.add(student)
-            
-        #     # Create team channels
-        #     for team in teams:
-        #         team_channel = Channel(
-        #             name=f'Team {team.name} Chat',
-        #             type='team',
-        #             team_id=team.id
-        #         )
-        #         ta_channel = Channel(
-        #             name=f'Team {team.name} TA Channel',
-        #             type='ta-team',
-        #             team_id=team.id
-        #         )
-        #         db.add_all([team_channel, ta_channel])
-            
-        #     db.commit()
-    finally:
-        db.close()
+#     finally:
+#         db.close()
 
 # WebSocket connection manager
 class ConnectionManager:
@@ -221,9 +179,9 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 # Initialize database on startup
-@app.on_event("startup")
-async def startup_event():
-    init_db()
+# @app.on_event("startup")
+# async def startup_event():
+#     init_db()
 
 # Pydantic models for request/response
 class MessageModel(BaseModel):
@@ -239,14 +197,80 @@ class MessageModel(BaseModel):
 async def get_chat_page(request: Request):
     return templates.TemplateResponse("chat.html", {"request": request})
 
-@app.post("/api/login")
+@app.post("/discussions")
 async def login(username: str, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == username).first()
     if not user:
         raise HTTPException(status_code=404, detail=f"User not found: {username}")
 
-    # Only get global channel
-    channels = db.query(Channel).filter(Channel.type == 'global').all()
+    channels = []
+    
+    # Add global channel for all users
+    global_channel = db.query(Channel).filter(Channel.type == 'global').first()
+    if global_channel:
+        channels.append(global_channel)
+    
+    # For students: add their team channel and team-TA channel if they exist
+    if user.role.role == RoleType.STUDENT and user.teams:
+        team = user.teams[0]  # Get the student's team
+        
+        # Get or create team channel
+        team_channel = db.query(Channel).filter(
+            Channel.type == 'team',
+            Channel.team_id == team.id
+        ).first()
+        
+        if not team_channel:
+            team_channel = Channel(
+                name=f'Team {team.name} Chat',
+                type='team',
+                team_id=team.id
+            )
+            db.add(team_channel)
+            db.commit()
+        
+        channels.append(team_channel)
+        
+        # Check if team has TA(s) and add team-TA channel if it exists
+        team_ta = db.query(Team_TA).filter(Team_TA.team_id == team.id).first()
+        if team_ta:
+            ta_channel = db.query(Channel).filter(
+                Channel.type == 'ta-team',
+                Channel.team_id == team.id
+            ).first()
+            
+            if not ta_channel:
+                ta_channel = Channel(
+                    name=f'Team {team.name} TA Channel',
+                    type='ta-team',
+                    team_id=team.id
+                )
+                db.add(ta_channel)
+                db.commit()
+            
+            channels.append(ta_channel)
+    
+    # For TAs and Profs: add all their team-TA channels
+    elif user.role.role in [RoleType.TA, RoleType.PROF]:
+        # Get all teams this TA/Prof is assigned to
+        team_tas = db.query(Team_TA).filter(Team_TA.ta_id == user.id).all()
+        for team_ta in team_tas:
+            ta_channel = db.query(Channel).filter(
+                Channel.type == 'ta-team',
+                Channel.team_id == team_ta.team_id
+            ).first()
+            
+            if not ta_channel:
+                team = db.query(Team).filter(Team.id == team_ta.team_id).first()
+                ta_channel = Channel(
+                    name=f'Team {team.name} TA Channel',
+                    type='ta-team',
+                    team_id=team.id
+                )
+                db.add(ta_channel)
+                db.commit()
+            
+            channels.append(ta_channel)
 
     return {
         "id": user.id,
@@ -254,11 +278,12 @@ async def login(username: str, db: Session = Depends(get_db)):
         "username": user.username,
         "team_id": user.team_id,
         "team_name": user.teams[0].name if user.teams else 'No Team',
-        "is_ta": user.role.role == RoleType.TA,
-        "channels": channels
+        "is_ta": user.role.role in [RoleType.TA, RoleType.PROF],
+        "channels": channels,
+        "role": user.role.role.value
     }
 
-@app.get("/api/channels/{channel_id}/messages")
+@app.get("/discussions/channels/{channel_id}/messages")
 async def get_messages(channel_id: int, db: Session = Depends(get_db)):
     messages = db.query(Message).filter(
         Message.channel_id == channel_id
@@ -278,7 +303,7 @@ async def get_messages(channel_id: int, db: Session = Depends(get_db)):
         } for message in messages
     ]
 
-@app.post("/api/messages")
+@app.post("/discussions/messages")
 async def send_message(message: MessageModel, db: Session = Depends(get_db)):
     try:
         file_path = None
@@ -322,7 +347,7 @@ async def send_message(message: MessageModel, db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.websocket("/ws/{channel_id}/{user_id}")
+@app.websocket("/discussions/ws/{channel_id}/{user_id}")
 async def websocket_endpoint(websocket: WebSocket, channel_id: int, user_id: int):
     await manager.connect(websocket, channel_id, user_id)
     try:

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chat Application</title>
+    <title>SAHARA Chat</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -19,6 +19,7 @@
             padding: 20px;
             border: 1px solid #ccc;
             border-radius: 5px;
+            text-align: center;
         }
         #chatContainer {
             display: none;
@@ -26,16 +27,17 @@
             border: 1px solid #ccc;
             border-radius: 5px;
             overflow: hidden;
+            height: calc(100vh - 40px);
         }
         #sidebar {
-            width: 200px;
+            width: 250px;
             border-right: 1px solid #ccc;
             padding: 10px;
             float: left;
             height: 100%;
         }
         #mainChat {
-            margin-left: 220px;
+            margin-left: 270px;
             padding: 10px;
             height: 100%;
             display: flex;
@@ -47,10 +49,11 @@
             padding: 10px;
             border: 1px solid #eee;
             margin-bottom: 10px;
+            background: #f9f9f9;
         }
         .message {
-            margin: 5px 0;
-            padding: 5px;
+            margin: 10px 0;
+            padding: 10px;
             border-radius: 5px;
         }
         .message.own {
@@ -58,14 +61,14 @@
             margin-left: 20%;
         }
         .message.other {
-            background-color: #f5f5f5;
+            background-color: #fff;
             margin-right: 20%;
         }
         .channel {
-            padding: 5px 10px;
+            padding: 10px;
             margin: 5px 0;
             cursor: pointer;
-            border-radius: 3px;
+            border-radius: 5px;
         }
         .channel:hover {
             background-color: #f0f0f0;
@@ -93,17 +96,28 @@
             padding: 10px;
             border-bottom: 1px solid #ccc;
             margin-bottom: 10px;
+            background: #f5f5f5;
+            border-radius: 5px;
         }
         .file-message {
             color: #0056b3;
             text-decoration: underline;
             cursor: pointer;
         }
+        .forum-section {
+            margin-bottom: 20px;
+        }
+        .forum-section h3 {
+            margin: 10px 0;
+            padding: 5px;
+            background: #eee;
+            border-radius: 3px;
+        }
     </style>
 </head>
 <body>
     <div id="loginContainer">
-        <h2>Login</h2>
+        <h2>Login to SAHARA Chat</h2>
         <input type="text" id="nameInput" placeholder="Enter your username" />
         <button onclick="login()">Login</button>
     </div>
@@ -111,7 +125,20 @@
     <div id="chatContainer">
         <div id="sidebar">
             <div id="userInfo"></div>
-            <div id="channelList"></div>
+            <div id="channelSections">
+                <div class="forum-section" id="globalSection">
+                    <h3>Global Forum</h3>
+                    <div class="channel-list"></div>
+                </div>
+                <div class="forum-section" id="teamSection">
+                    <h3>Team Forum</h3>
+                    <div class="channel-list"></div>
+                </div>
+                <div class="forum-section" id="taSection">
+                    <h3>Team-TA Forums</h3>
+                    <div class="channel-list"></div>
+                </div>
+            </div>
         </div>
         <div id="mainChat">
             <div id="messageContainer"></div>
@@ -128,13 +155,35 @@
         let currentUser = null;
         let activeChannel = null;
         let ws = null;
-        let channels = [];
-        let pendingFile = null;  // Store the selected file here
+        let pendingFile = null;
+
+        async function refreshChannels() {
+            try {
+                const response = await fetch(`/discussions?username=${encodeURIComponent(currentUser.username)}`, {
+                    method: 'POST'
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to refresh channels');
+                }
+                
+                const userData = await response.json();
+                currentUser.channels = userData.channels;
+                displayChannels();
+                
+                // If we don't have an active channel yet, select the first one
+                if (!activeChannel && currentUser.channels.length > 0) {
+                    selectChannel(currentUser.channels[0]);
+                }
+            } catch (error) {
+                console.error('Error refreshing channels:', error);
+            }
+        }
 
         async function login() {
             const username = document.getElementById('nameInput').value;
             try {
-                const response = await fetch(`/api/login?username=${encodeURIComponent(username)}`, {
+                const response = await fetch(`/discussions?username=${encodeURIComponent(username)}`, {
                     method: 'POST'
                 });
                 
@@ -149,7 +198,12 @@
                 document.getElementById('chatContainer').style.display = 'block';
                 
                 displayUserInfo();
+                // Initial display of channels
                 displayChannels();
+                
+                // Refresh channels after a short delay to catch any newly created channels
+                setTimeout(refreshChannels, 100);
+                
                 if (currentUser.channels.length > 0) {
                     selectChannel(currentUser.channels[0]);
                 }
@@ -164,19 +218,34 @@
             userInfo.innerHTML = `
                 <strong>${currentUser.name}</strong><br>
                 ${currentUser.team_name}<br>
-                ${currentUser.is_ta ? 'TA' : 'Student'}
+                Role: ${currentUser.role}
             `;
         }
 
         function displayChannels() {
-            const channelList = document.getElementById('channelList');
-            channelList.innerHTML = '';
+            // Clear all channel lists
+            document.querySelectorAll('.channel-list').forEach(list => list.innerHTML = '');
+            
+            // Hide all sections by default
+            document.getElementById('teamSection').style.display = 'none';
+            document.getElementById('taSection').style.display = 'none';
+
+            // Sort channels by type
             currentUser.channels.forEach(channel => {
                 const div = document.createElement('div');
                 div.className = 'channel';
                 div.textContent = channel.name;
                 div.onclick = () => selectChannel(channel);
-                channelList.appendChild(div);
+
+                if (channel.type === 'global') {
+                    document.querySelector('#globalSection .channel-list').appendChild(div);
+                } else if (channel.type === 'team') {
+                    document.getElementById('teamSection').style.display = 'block';
+                    document.querySelector('#teamSection .channel-list').appendChild(div);
+                } else if (channel.type === 'ta-team') {
+                    document.getElementById('taSection').style.display = 'block';
+                    document.querySelector('#taSection .channel-list').appendChild(div);
+                }
             });
         }
 
@@ -194,12 +263,12 @@
             });
 
             // Load existing messages
-            const response = await fetch(`/api/channels/${channel.id}/messages`);
+            const response = await fetch(`/discussions/channels/${channel.id}/messages`);
             const messages = await response.json();
             displayMessages(messages);
 
             // Connect to WebSocket
-            ws = new WebSocket(`ws://localhost:8000/ws/${channel.id}/${currentUser.id}`);
+            ws = new WebSocket(`ws://localhost:8000/discussions/ws/${channel.id}/${currentUser.id}`);
             ws.onmessage = handleWebSocketMessage;
         }
 
@@ -286,7 +355,7 @@
             }
 
             try {
-                const response = await fetch('/api/messages', {
+                const response = await fetch('/discussions/messages', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json'
