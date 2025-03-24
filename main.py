@@ -1,6 +1,6 @@
 import json
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table
 from sqlalchemy.ext.declarative import declarative_base
@@ -31,6 +31,10 @@ import json
 import csv
 from io import StringIO
 from fastapi.staticfiles import StaticFiles
+from typing import ForwardRef
+
+# Create uploads directory if it doesn't exist
+os.makedirs("uploads", exist_ok=True)
 
 # Import CSV processing functions from authentication/read_csv.py
 sys.path.append(os.path.join(os.path.dirname(__file__), 'authentication'))
@@ -91,6 +95,67 @@ class Skill(Base):
     # Relationship with teams
     teams = relationship("Team", secondary=team_skills, back_populates="skills")
 
+class Submittable(Base):
+    __tablename__ = "submittables"
+    id = Column(Integer, primary_key=True)
+    opens_at = Column(String, nullable=True)  # ISO 8601 format
+    deadline = Column(String, nullable=False)  # ISO 8601 format
+    description = Column(String, nullable=False)
+    created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+    creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    creator = relationship("User", back_populates="submittables")
+    submissions = relationship("Submission", back_populates="submittable")
+    reference_files = relationship("SubmittableReferenceFile", back_populates="submittable", lazy="joined")
+
+    @validates("creator_id")
+    def validate_creator(self, key, value):
+        user = SessionLocal.query(User).filter_by(id=value).first()
+        if user and user.role.role != RoleType.PROF:
+            raise ValueError("Only professors can create submittables.")
+        return value
+
+class Submission(Base):
+    __tablename__ = "submissions"
+    id = Column(Integer, primary_key=True)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+    submitted_on = Column(String, default=datetime.now(timezone.utc).isoformat())
+    submittable_id = Column(Integer, ForeignKey("submittables.id"), nullable=False)
+
+    team = relationship("Team", back_populates="submissions")
+    submittable = relationship("Submittable", back_populates="submissions")
+    files = relationship("SubmissionFile", back_populates="submission")
+
+class SubmissionFile(Base):
+    __tablename__ = "submission_files"
+    id = Column(Integer, primary_key=True)
+    submission_id = Column(Integer, ForeignKey("submissions.id"), nullable=False)
+    file_url = Column(String, nullable=False)  # URL path to the submitted file
+    original_filename = Column(String, nullable=False)  # Original filename of the submitted file
+
+    submission = relationship("Submission", back_populates="files")
+
+
+class SubmittableReferenceFile(Base):
+    __tablename__ = "submittable_reference_files"
+    id = Column(Integer, primary_key=True)
+    submittable_id = Column(Integer, ForeignKey("submittables.id"), nullable=False)
+    file_url = Column(String, nullable=False)  # URL path to the reference file
+    original_filename = Column(String, nullable=False)  # Original filename of the reference file
+    uploaded_on = Column(String, default=datetime.now(timezone.utc).isoformat())
+    creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    submittable = relationship("Submittable", back_populates="reference_files")
+    creator = relationship("User")
+
+    @validates("creator_id")
+    def validate_creator(self, key, value):
+        user = SessionLocal.query(User).filter_by(id=value).first()
+        if user and user.role.role != RoleType.PROF:
+            raise ValueError("Only professors can create reference files.")
+        return value
+
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
@@ -110,6 +175,7 @@ class User(Base):
     # global_calendar_events = relationship("GlobalCalendarEvent", back_populates="creator")
     skills = relationship("Skill", secondary=user_skills, back_populates="users")
     gradeable_scores = relationship("GradeableScores", back_populates="user")
+    submittables = relationship("Submittable", back_populates="creator", lazy="joined")
     
     @validates('skills')
     def validate_skills(self, key, skill):
@@ -127,6 +193,7 @@ class Team(Base):
     
     members = relationship("User", secondary="team_members", back_populates="teams")
     skills = relationship("Skill", secondary=team_skills, back_populates="teams")
+    submissions = relationship("Submission", back_populates="team")
 
 class Form(Base):
     __tablename__ = "forms"
@@ -1977,3 +2044,446 @@ async def upload_gradeable_scores(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error uploading scores: {str(e)}")
+
+
+@app.post("/submittables/{submittable_id}/submit")
+async def submit_file(
+    submittable_id: int,
+    files: List[UploadFile] = File(...),  # Now accepts multiple files
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Submit multiple files for a submittable"""
+    try:
+        # Get the submittable
+        submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
+        if not submittable:
+            raise HTTPException(status_code=404, detail="Submittable not found")
+        
+        # Check if submission is still open
+        now = datetime.now(timezone.utc)
+        deadline = datetime.fromisoformat(submittable.deadline.replace('Z', '+00:00'))
+        if now > deadline:
+            raise HTTPException(status_code=400, detail="Submission deadline has passed")
+        
+        # Get user's team
+        user = current_user["user"]
+        team = db.query(Team).filter(Team.id == user.team_id).first()
+        if not team:
+            raise HTTPException(status_code=400, detail="User is not part of a team")
+        
+        # Create submission record
+        new_submission = Submission(
+            team_id=team.id,
+            submittable_id=submittable_id
+        )
+        db.add(new_submission)
+        db.commit()
+        db.refresh(new_submission)
+        
+        # Save all submitted files
+        for file in files:
+            file_extension = file.filename.split('.')[-1]
+            file_name = f"submission_{uuid.uuid4()}.{file_extension}"
+            file_path = f"uploads/{file_name}"
+            
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            
+            new_file = SubmissionFile(
+                submission_id=new_submission.id,
+                file_url=f"/uploads/{file_name}",  # URL path
+                original_filename=file.filename
+            )
+            db.add(new_file)
+        
+        db.commit()
+        
+        return JSONResponse(status_code=201, content={
+            "message": "Files submitted successfully",
+            "submission_id": new_submission.id
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error submitting files: {str(e)}")
+
+@app.get("/submissions/{submission_id}/download")
+async def download_submission(
+    submission_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Download a submission file"""
+    try:
+        submission = db.query(Submission).filter(Submission.id == submission_id).first()
+        if not submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+        
+        user = current_user["user"]
+        role = current_user["role"]
+        
+        # Check permissions
+        if role == RoleType.PROF:
+            # Professors can download any submission
+            pass
+        elif role == RoleType.STUDENT:
+            # Students can only download their team's submission
+            if not user.team_id or user.team_id != submission.team_id:
+                raise HTTPException(status_code=403, detail="Not authorized to download this submission")
+        else:
+            raise HTTPException(status_code=403, detail="Not authorized to download submissions")
+        
+        # Return list of files in the submission
+        files = []
+        for file in submission.files:
+            local_path = file.file_url.lstrip('/')
+            if not os.path.exists(local_path):
+                continue
+            files.append({
+                "id": file.id,
+                "original_filename": file.original_filename,
+                "file_url": file.file_url
+            })
+        
+        return JSONResponse(status_code=200, content={
+            "submission_id": submission_id,
+            "submitted_on": submission.submitted_on,
+            "files": files
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading submission: {str(e)}")
+
+@app.get("/submissions/{submission_id}/files/{file_id}/download")
+async def download_submission_file(
+    submission_id: int,
+    file_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Download a specific file from a submission"""
+    try:
+        submission = db.query(Submission).filter(Submission.id == submission_id).first()
+        if not submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+        
+        file = db.query(SubmissionFile).filter(
+            SubmissionFile.id == file_id,
+            SubmissionFile.submission_id == submission_id
+        ).first()
+        
+        if not file:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        user = current_user["user"]
+        role = current_user["role"]
+        
+        # Check permissions
+        if role == RoleType.PROF:
+            # Professors can download any submission
+            pass
+        elif role == RoleType.STUDENT:
+            # Students can only download their team's submission
+            if not user.team_id or user.team_id != submission.team_id:
+                raise HTTPException(status_code=403, detail="Not authorized to download this submission")
+        else:
+            raise HTTPException(status_code=403, detail="Not authorized to download submissions")
+        
+        # Convert URL path to local path
+        local_path = file.file_url.lstrip('/')
+        if not os.path.exists(local_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return FileResponse(
+            local_path,
+            filename=file.original_filename,
+            media_type="application/octet-stream"
+        )
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+
+@app.get("/submittables/")
+async def get_submittables(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all submittables with their status (upcoming, open, closed) and submission status for students"""
+    try:
+        submittables = db.query(Submittable).all()
+        now = datetime.now(timezone.utc)
+        user = current_user["user"]
+        role = current_user["role"]
+        
+        result = {
+            "upcoming": [],
+            "open": [],
+            "closed": []
+        }
+        
+        for submittable in submittables:
+            opens_at = datetime.fromisoformat(submittable.opens_at.replace('Z', '+00:00')) if submittable.opens_at else None
+            deadline = datetime.fromisoformat(submittable.deadline.replace('Z', '+00:00'))
+            
+            submittable_data = {
+                "id": submittable.id,
+                "description": submittable.description,
+                "deadline": submittable.deadline,
+                "reference_files": [
+                    {
+                        "id": ref.id,
+                        "original_filename": ref.original_filename
+                    } for ref in submittable.reference_files
+                ]
+            }
+            
+            # Add submission status for students
+            if role == RoleType.STUDENT and user.team_id:
+                submission = db.query(Submission).filter(
+                    Submission.submittable_id == submittable.id,
+                    Submission.team_id == user.team_id
+                ).first()
+                
+                if submission:
+                    submittable_data["submission_status"] = {
+                        "has_submitted": True,
+                        "submission_id": submission.id,
+                        "submitted_on": submission.submitted_on,
+                        "original_filename": submission.original_filename
+                    }
+                else:
+                    submittable_data["submission_status"] = {
+                        "has_submitted": False,
+                        "submission_id": None,
+                        "submitted_on": None,
+                        "original_filename": None
+                    }
+            
+            if opens_at and now < opens_at:
+                result["upcoming"].append(submittable_data)
+            elif now <= deadline:
+                result["open"].append(submittable_data)
+            else:
+                result["closed"].append(submittable_data)
+        
+        return JSONResponse(status_code=200, content=result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching submittables: {str(e)}")
+
+@app.get("/submittables/{submittable_id}/reference-files/{ref_file_id}/download")
+async def download_reference_file(
+    submittable_id: int,
+    ref_file_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Download a reference file"""
+    try:
+        ref_file = db.query(SubmittableReferenceFile).filter(
+            SubmittableReferenceFile.id == ref_file_id,
+            SubmittableReferenceFile.submittable_id == submittable_id
+        ).first()
+        
+        if not ref_file:
+            raise HTTPException(status_code=404, detail="Reference file not found")
+        
+        # Convert URL path to local path
+        local_path = ref_file.file_url.lstrip('/')
+        if not os.path.exists(local_path):
+            raise HTTPException(status_code=404, detail="Reference file not found")
+        
+        return FileResponse(
+            local_path,
+            filename=ref_file.original_filename,
+            media_type="application/octet-stream"
+        )
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading reference file: {str(e)}")
+
+class SubmittableCreateRequest(BaseModel):
+    opens_at: Optional[str] = None  # ISO 8601 format
+    deadline: str  # ISO 8601 format
+    description: str
+    
+    @validator('deadline')
+    def validate_deadline(cls, v):
+        try:
+            datetime.fromisoformat(v.replace('Z', '+00:00'))
+            return v
+        except ValueError:
+            raise ValueError("Invalid deadline format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
+    
+    @validator('opens_at')
+    def validate_opens_at(cls, v):
+        if v:
+            try:
+                datetime.fromisoformat(v.replace('Z', '+00:00'))
+                return v
+            except ValueError:
+                raise ValueError("Invalid opens_at format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
+        return v
+
+@app.post("/submittables/create")
+async def create_submittable(
+    submittable: SubmittableCreateRequest,
+    files: List[UploadFile] = File(...),  # Now requires at least one file
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_required)
+):
+    """Create a new submittable with reference files"""
+    try:
+        # Get the creator (professor) from token
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        user = db.query(User).filter(User.username == username).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Create submittable in database
+        new_submittable = Submittable(
+            opens_at=submittable.opens_at,
+            deadline=submittable.deadline,
+            description=submittable.description,
+            creator_id=user.id
+        )
+        
+        db.add(new_submittable)
+        db.commit()
+        db.refresh(new_submittable)
+
+        # Save all files as reference files
+        for file in files:
+            file_extension = file.filename.split('.')[-1]
+            file_name = f"ref_{uuid.uuid4()}.{file_extension}"
+            file_path = f"uploads/{file_name}"
+            
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            
+            new_ref = SubmittableReferenceFile(
+                submittable_id=new_submittable.id,
+                file_url=f"/uploads/{file_name}",  # URL path
+                original_filename=file.filename,
+                creator_id=user.id
+            )
+            db.add(new_ref)
+        
+        db.commit()
+        
+        return JSONResponse(status_code=201, content={
+            "message": "Submittable created successfully",
+            "submittable_id": new_submittable.id
+        })
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating submittable: {str(e)}")
+
+@app.get("/submittables/{submittable_id}")
+async def get_submittable(
+    submittable_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get details of a specific submittable"""
+    try:
+        submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
+        if not submittable:
+            raise HTTPException(status_code=404, detail="Submittable not found")
+        
+        return JSONResponse(status_code=200, content={
+            "id": submittable.id,
+            "opens_at": submittable.opens_at,
+            "deadline": submittable.deadline,
+            "description": submittable.description,
+            "created_at": submittable.created_at,
+            "reference_files": [
+                {
+                    "id": ref.id,
+                    "original_filename": ref.original_filename
+                } for ref in submittable.reference_files
+            ]
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching submittable: {str(e)}")
+
+@app.get("/submittables/{submittable_id}/submissions")
+async def get_submittable_submissions(
+    submittable_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all submissions for a submittable (professors only)"""
+    try:
+        if current_user["role"] != RoleType.PROF:
+            raise HTTPException(status_code=403, detail="Only professors can view all submissions")
+        
+        submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
+        if not submittable:
+            raise HTTPException(status_code=404, detail="Submittable not found")
+        
+        submissions = db.query(Submission).filter(Submission.submittable_id == submittable_id).all()
+        
+        result = []
+        for submission in submissions:
+            submission_data = {
+                "id": submission.id,
+                "team_id": submission.team_id,
+                "submitted_on": submission.submitted_on,
+                "files": [
+                    {
+                        "id": file.id,
+                        "original_filename": file.original_filename
+                    } for file in submission.files
+                ]
+            }
+            result.append(submission_data)
+        
+        return JSONResponse(status_code=200, content=result)
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching submissions: {str(e)}")
+
+@app.delete("/submittables/{submittable_id}")
+async def delete_submittable(
+    submittable_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete a submittable (professors only)"""
+    try:
+        if current_user["role"] != RoleType.PROF:
+            raise HTTPException(status_code=403, detail="Only professors can delete submittables")
+        
+        submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
+        if not submittable:
+            raise HTTPException(status_code=404, detail="Submittable not found")
+        
+        # Delete associated files
+        for ref_file in submittable.reference_files:
+            local_path = ref_file.file_url.lstrip('/')
+            if os.path.exists(local_path):
+                os.remove(local_path)
+        
+        # Delete from database
+        db.delete(submittable)
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={
+            "message": "Submittable deleted successfully",
+            "submittable_id": submittable_id
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting submittable: {str(e)}")
