@@ -1,5 +1,5 @@
 import json
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime
@@ -32,6 +32,7 @@ import csv
 from io import StringIO
 from fastapi.staticfiles import StaticFiles
 from typing import ForwardRef
+import base64
 
 # Create uploads directory if it doesn't exist
 os.makedirs("uploads", exist_ok=True)
