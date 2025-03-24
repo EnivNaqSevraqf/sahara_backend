@@ -1,11 +1,13 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, UploadFile, File
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, UploadFile, File, Depends
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Dict, List, Optional
-from pydantic import BaseModel, validator
-import psycopg2
-from psycopg2.extras import RealDictCursor
+from pydantic import BaseModel
+from sqlalchemy import create_engine, Column, Integer, String, ForeignKey, DateTime, Text, Boolean, Enum, Table
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session, relationship
+from sqlalchemy.dialects.postgresql import JSONB
 import json
 import os
 from datetime import datetime
@@ -13,10 +15,81 @@ import uvicorn
 import base64
 import uuid
 from fastapi.staticfiles import StaticFiles
+import enum
+
+# Database configuration - using main.py's database
+DATABASE_URL = "postgresql://avnadmin:AVNS_DkrVvzHCnOiMVJwagav@pg-8b6fabf-sahara-team-8.f.aivencloud.com:17950/defaultdb"
+Base = declarative_base()
 
 # Create required directories
 os.makedirs("templates", exist_ok=True)
 os.makedirs("static", exist_ok=True)
+os.makedirs("uploads", exist_ok=True)
+
+# Role enum from main.py
+class RoleType(enum.Enum):
+    PROF = "prof"
+    STUDENT = "student"
+    TA = "ta"
+
+# SQLAlchemy Models
+class Role(Base):
+    __tablename__ = "roles"
+    id = Column(Integer, primary_key=True)
+    role = Column(Enum(RoleType), nullable=False, unique=True)
+    users = relationship("User", back_populates="role")
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    email = Column(String, nullable=False, unique=True)
+    username = Column(String, nullable=False, unique=True)
+    role_id = Column(Integer, ForeignKey("roles.id"), nullable=False)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
+    hashed_password = Column(String, nullable=False)
+
+    role = relationship("Role", back_populates="users")
+    teams = relationship("Team", secondary="team_members", back_populates="members")
+    messages = relationship("Message", back_populates="sender")
+
+class Team(Base):
+    __tablename__ = "teams"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    members = relationship("User", secondary="team_members", back_populates="teams")
+
+team_members = Table(
+    "team_members", Base.metadata,
+    Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True)
+)
+
+# Chat-specific models
+class Channel(Base):
+    __tablename__ = "channels"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(50), nullable=False)
+    type = Column(String(10), nullable=False)  # global, team, or ta-team
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
+    messages = relationship("Message", back_populates="channel")
+
+class Message(Base):
+    __tablename__ = "messages"
+    id = Column(Integer, primary_key=True)
+    content = Column(Text, nullable=False)
+    sender_id = Column(Integer, ForeignKey("users.id"))
+    channel_id = Column(Integer, ForeignKey("channels.id"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    message_type = Column(String(10), default='text')
+    file_name = Column(String(255))
+
+    sender = relationship("User", back_populates="messages")
+    channel = relationship("Channel", back_populates="messages")
+
+# Create engine and sessionmaker
+engine = create_engine(DATABASE_URL)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Create app
 app = FastAPI()
@@ -30,147 +103,85 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 # Set up templates directory
 templates = Jinja2Templates(directory="templates")
 
-# Database configuration
-DB_CONFIG = {
-    "dbname": "chat_db",
-    "user": "postgres",
-    "password": "postgres",
-    "host": "localhost"
-}
-
-# Add file upload directory configuration
-UPLOAD_DIR = "uploads"
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+# Database dependency
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 def init_db():
     """Initialize the database with required tables"""
-    conn = psycopg2.connect(**DB_CONFIG)
-    cur = conn.cursor()
+    Base.metadata.create_all(bind=engine)
     
-    # Drop all tables with dependencies in correct order
-    cur.execute('DROP TABLE IF EXISTS messages')
-    cur.execute('DROP TABLE IF EXISTS shared_files')
-    cur.execute('DROP TABLE IF EXISTS channels')
-    cur.execute('DROP TABLE IF EXISTS students')
-    cur.execute('DROP TABLE IF EXISTS teams')
-    
-    # Create teams table
-    cur.execute('''
-    CREATE TABLE teams (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(50) NOT NULL
-    )
-    ''')
-    
-    # Create students table with is_ta
-    cur.execute('''
-    CREATE TABLE students (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(50) NOT NULL,
-        password VARCHAR(50) NOT NULL,
-        roll_no VARCHAR(50) UNIQUE NOT NULL,
-        team_id INTEGER REFERENCES teams(id),
-        is_ta BOOLEAN DEFAULT FALSE
-    )
-    ''')
-    
-    # Create channels table
-    cur.execute('''
-    CREATE TABLE channels (
-        id SERIAL PRIMARY KEY,
-        name VARCHAR(50) NOT NULL,
-        type VARCHAR(10) NOT NULL CHECK (type IN ('global', 'team', 'ta-team')),
-        team_id INTEGER REFERENCES teams(id)
-    )
-    ''')
-    
-    # Create messages table
-    cur.execute('''
-    CREATE TABLE messages (
-        id SERIAL PRIMARY KEY,
-        content TEXT NOT NULL,
-        sender_id INTEGER REFERENCES students(id),
-        channel_id INTEGER REFERENCES channels(id),
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        message_type VARCHAR(10) DEFAULT 'text',
-        file_name VARCHAR(255)
-    )
-    ''')
-    
-    # Create shared_files table
-    cur.execute('''
-    CREATE TABLE shared_files (
-        id SERIAL PRIMARY KEY,
-        filename VARCHAR(255) NOT NULL,
-        filepath VARCHAR(255) NOT NULL,
-        channel_id INTEGER REFERENCES channels(id),
-        uploader_id INTEGER REFERENCES students(id),
-        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    ''')
-    
-    # Insert dummy data if not exists
-    cur.execute("SELECT COUNT(*) FROM teams")
-    if cur.fetchone()[0] == 0:
-        # Insert teams
-        cur.execute('''
-        INSERT INTO teams (name) VALUES 
-        ('Team A'), ('Team B'), ('Team C')
-        ''')
-        
-        # Reset student id sequence to start TAs from ID 16
-        cur.execute("ALTER SEQUENCE students_id_seq RESTART WITH 16")
-        
-        # Insert TAs
-        for i in range(3):
-            cur.execute('''
-            INSERT INTO students (name, password, roll_no, team_id, is_ta)
-            VALUES (%s, %s, %s, %s, TRUE)
-            ''', (f'TA {i+1}', 'password', f'TA{i+1}', i+1))
-        
-        # Reset sequence for regular students
-        cur.execute("ALTER SEQUENCE students_id_seq RESTART WITH 1")
-        
-        # Insert regular students (5 per team)
-        for team_id in range(1, 4):
-            for i in range(5):
-                student_num = (team_id - 1) * 5 + i + 1
-                cur.execute('''
-                INSERT INTO students (name, password, roll_no, team_id, is_ta)
-                VALUES (%s, %s, %s, %s, FALSE)
-                ''', (f'Student {student_num}', 'password', f'ROLL{student_num}', team_id))
-        
-        # Create channels
-        cur.execute('''
-        INSERT INTO channels (name, type, team_id)
-        VALUES ('Global Chat', 'global', NULL)
-        ''')
-        
-        # Create team and TA channels
-        for team_id in range(1, 4):
-            cur.execute('''
-            INSERT INTO channels (name, type, team_id)
-            VALUES 
-                (%s, 'team', %s),
-                (%s, 'ta-team', %s)
-            ''', (
-                f'Team {team_id} Chat', team_id,
-                f'Team {team_id} TA Channel', team_id
-            ))
-    
-    conn.commit()
-    cur.close()
-    conn.close()
+    # Only insert initial data if the tables are empty
+    db = SessionLocal()
+    try:
+        if db.query(Channel).count() == 0:
+            # Create only global channel
+            global_channel = Channel(name='Global Chat', type='global')
+            db.add(global_channel)
+            db.commit()
 
-# Initialize database on startup
-@app.on_event("startup")
-async def startup_event():
-    os.makedirs("templates", exist_ok=True)
-    init_db()
+        # Comment out team initialization for now
+        # if db.query(Team).count() == 0:
+        #     # Insert teams
+        #     teams = [
+        #         Team(name='Team A'),
+        #         Team(name='Team B'),
+        #         Team(name='Team C')
+        #     ]
+        #     db.add_all(teams)
+        #     db.commit()
+
+        #     # Insert TAs
+        #     for i, team in enumerate(teams):
+        #         ta = User(
+        #             name=f'TA {i+1}',
+        #             email=f'ta{i+1}@example.com',
+        #             username=f'ta{i+1}',
+        #             hashed_password='password',
+        #             role_id=3,  # Assuming role_id 3 is for TA
+        #             team_id=team.id
+        #         )
+        #         db.add(ta)
+            
+        #     # Insert regular students
+        #     for team in teams:
+        #         for i in range(5):
+        #             student = User(
+        #                 name=f'Student {i+1} of {team.name}',
+        #                 email=f'student{i+1}@example.com',
+        #                 username=f'student{i+1}',
+        #                 hashed_password='password',
+        #                 role_id=2,  # Assuming role_id 2 is for Student
+        #                 team_id=team.id
+        #             )
+        #             db.add(student)
+            
+        #     # Create team channels
+        #     for team in teams:
+        #         team_channel = Channel(
+        #             name=f'Team {team.name} Chat',
+        #             type='team',
+        #             team_id=team.id
+        #         )
+        #         ta_channel = Channel(
+        #             name=f'Team {team.name} TA Channel',
+        #             type='ta-team',
+        #             team_id=team.id
+        #         )
+        #         db.add_all([team_channel, ta_channel])
+            
+        #     db.commit()
+    finally:
+        db.close()
 
 # WebSocket connection manager
 class ConnectionManager:
@@ -185,7 +196,6 @@ class ConnectionManager:
             self.rooms[room_name] = []
         
         self.rooms[room_name].append(websocket)
-        # Store user_id in websocket state for later use
         websocket.user_id = user_id
     
     def disconnect(self, websocket: WebSocket, channel_id: int):
@@ -205,23 +215,18 @@ class ConnectionManager:
                 except WebSocketDisconnect:
                     dead_connections.append(connection)
             
-            # Remove dead connections
             for conn in dead_connections:
                 self.rooms[room_name].remove(conn)
 
 manager = ConnectionManager()
 
-# Pydantic models
-class User(BaseModel):
-    name: str
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    init_db()
 
-    @validator('name')
-    def name_must_not_be_empty(cls, v):
-        if not v.strip():
-            raise ValueError('Username cannot be empty')
-        return v.strip()
-
-class Message(BaseModel):
+# Pydantic models for request/response
+class MessageModel(BaseModel):
     content: str
     channel_id: int
     sender_id: int
@@ -229,198 +234,85 @@ class Message(BaseModel):
     file_data: Optional[str] = None
     file_name: Optional[str] = None
 
-# Database helper functions
-def get_db_connection():
-    return psycopg2.connect(**DB_CONFIG, cursor_factory=RealDictCursor)
-
-def get_user_by_name(name: str):
-    conn = None
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT 
-                s.id, 
-                s.name, 
-                s.team_id, 
-                s.is_ta,
-                t.name as team_name
-            FROM students s
-            LEFT JOIN teams t ON s.team_id = t.id
-            WHERE s.name = %s
-        """, (name,))
-        user = cur.fetchone()
-        cur.close()
-        return user
-    except Exception as e:
-        print(f"Database error: {str(e)}")  # Debug log
-        raise
-    finally:
-        if conn:
-            conn.close()
-
-def get_channels_for_user(user_id: int):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    # Get user's team_id and check if they're a TA
-    cur.execute("""
-        SELECT team_id, is_ta 
-        FROM students 
-        WHERE id = %s
-    """, (user_id,))
-    user = cur.fetchone()
-    
-    if not user:
-        return []
-        
-    team_id = user['team_id']
-    is_ta = user['is_ta']
-    
-    # Get available channels
-    if is_ta:
-        cur.execute("""
-            SELECT c.*, t.name as team_name 
-            FROM channels c
-            LEFT JOIN teams t ON c.team_id = t.id
-            WHERE type = 'global' 
-            OR (team_id = %s)
-        """, (team_id,))
-    else:
-        cur.execute("""
-            SELECT c.*, t.name as team_name 
-            FROM channels c
-            LEFT JOIN teams t ON c.team_id = t.id
-            WHERE type = 'global' 
-            OR (team_id = %s AND (type = 'team' OR type = 'ta-team'))
-        """, (team_id,))
-    
-    channels = cur.fetchall()
-    cur.close()
-    conn.close()
-    return channels
-
-def save_message(sender_id: int, channel_id: int, content: str, message_type: str = 'text', file_name: Optional[str] = None):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    cur.execute("""
-        INSERT INTO messages (sender_id, channel_id, content, message_type, file_name)
-        VALUES (%s, %s, %s, %s, %s)
-        RETURNING id, created_at
-    """, (sender_id, channel_id, content, message_type, file_name))
-    
-    result = cur.fetchone()
-    conn.commit()
-    cur.close()
-    conn.close()
-    return result
-
-def get_recent_messages(channel_id: int, limit: int = 50):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    cur.execute("""
-        SELECT m.*, s.name as sender_name
-        FROM messages m
-        JOIN students s ON m.sender_id = s.id
-        WHERE m.channel_id = %s
-        ORDER BY m.created_at DESC
-        LIMIT %s
-    """, (channel_id, limit))
-    
-    messages = cur.fetchall()
-    cur.close()
-    conn.close()
-    
-    # Convert to list and reverse to show oldest first
-    messages = list(messages)
-    messages.reverse()
-    return messages
-
-# API Routes
+# Routes
 @app.get("/", response_class=HTMLResponse)
 async def get_chat_page(request: Request):
     return templates.TemplateResponse("chat.html", {"request": request})
 
 @app.post("/api/login")
-async def login(user: User):
-    print(f"Login attempt for user: {user.name}")  # Debug log
-    try:
-        db_user = get_user_by_name(user.name)
-        if not db_user:
-            raise HTTPException(status_code=404, detail=f"User not found: {user.name}")
+async def login(username: str, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == username).first()
+    if not user:
+        raise HTTPException(status_code=404, detail=f"User not found: {username}")
 
-        channels = get_channels_for_user(db_user['id'])
-        print(f"Found channels for user: {channels}")  # Debug log
+    # Only get global channel
+    channels = db.query(Channel).filter(Channel.type == 'global').all()
 
-        return {
-            "id": db_user['id'],
-            "name": db_user['name'],
-            "team_id": db_user['team_id'],
-            "team_name": db_user.get('team_name', 'No Team'),
-            "is_ta": db_user.get('is_ta', False),
-            "channels": channels
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"Login error: {str(e)}")  # Debug log
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "id": user.id,
+        "name": user.name,
+        "username": user.username,
+        "team_id": user.team_id,
+        "team_name": user.teams[0].name if user.teams else 'No Team',
+        "is_ta": user.role.role == RoleType.TA,
+        "channels": channels
+    }
 
 @app.get("/api/channels/{channel_id}/messages")
-async def get_messages(channel_id: int):
-    try:
-        messages = get_recent_messages(channel_id)
-        return messages
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+async def get_messages(channel_id: int, db: Session = Depends(get_db)):
+    messages = db.query(Message).filter(
+        Message.channel_id == channel_id
+    ).order_by(Message.created_at).all()
+    
+    # Convert messages to dictionary with sender information
+    return [
+        {
+            "id": message.id,
+            "content": message.content,
+            "sender_id": message.sender_id,
+            "sender_name": message.sender.name,
+            "channel_id": message.channel_id,
+            "created_at": message.created_at.isoformat(),
+            "message_type": message.message_type,
+            "file_name": message.file_name
+        } for message in messages
+    ]
 
 @app.post("/api/messages")
-async def send_message(message: Message):
+async def send_message(message: MessageModel, db: Session = Depends(get_db)):
     try:
         file_path = None
         if message.message_type == 'file' and message.file_data:
-            # Decode base64 file data
             file_data = base64.b64decode(message.file_data)
-            # Generate unique filename
             file_name = f"{uuid.uuid4()}_{message.file_name}"
-            file_path = os.path.join(UPLOAD_DIR, file_name)
-            # Save file
+            file_path = os.path.join("uploads", file_name)
             with open(file_path, "wb") as f:
                 f.write(file_data)
-            # Update content to be the file path
-            message.content = file_path
+            message.content = file_name  # Store just the filename, not the full path
 
-        result = save_message(
-            message.sender_id,
-            message.channel_id,
-            message.content,
+        new_message = Message(
+            content=message.content,
+            sender_id=message.sender_id,
+            channel_id=message.channel_id,
             message_type=message.message_type,
-            file_name=message.file_name
+            file_name=message.content if message.message_type == 'file' else None  # Use content as file_name for files
         )
-        
-        # Get sender info
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM students WHERE id = %s", (message.sender_id,))
-        sender = cur.fetchone()
-        cur.close()
-        conn.close()
+        db.add(new_message)
+        db.commit()
+        db.refresh(new_message)
 
         # Format message for broadcasting
         message_data = {
-            "id": result['id'],
-            "content": message.content,
-            "sender_id": message.sender_id,
-            "sender_name": sender['name'],
-            "channel_id": message.channel_id,
-            "created_at": result['created_at'].isoformat(),
-            "message_type": message.message_type,
-            "file_name": message.file_name if message.message_type == 'file' else None
+            "id": new_message.id,
+            "content": new_message.content,
+            "sender_id": new_message.sender_id,
+            "sender_name": new_message.sender.name,
+            "channel_id": new_message.channel_id,
+            "created_at": new_message.created_at.isoformat(),
+            "message_type": new_message.message_type,
+            "file_name": new_message.content if message.message_type == 'file' else None  # Use content as file_name for files
         }
 
-        # Broadcast to all channel members including sender
         await manager.broadcast(
             json.dumps(message_data),
             message.channel_id
@@ -436,96 +328,8 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, user_id: int
     try:
         while True:
             data = await websocket.receive_text()
-            # Keep connection alive, messages handled through HTTP endpoints
     except WebSocketDisconnect:
         manager.disconnect(websocket, channel_id)
-
-# Add new routes for file handling
-@app.post("/api/channels/{channel_id}/upload")
-async def upload_file(channel_id: int, file: UploadFile = File(...)):
-    try:
-        # Create unique filename
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{timestamp}_{file.filename}"
-        filepath = os.path.join(UPLOAD_DIR, filename)
-        
-        # Save file
-        with open(filepath, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-        
-        # Save file info to database
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO shared_files (filename, filepath, channel_id, uploader_id)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id
-        """, (file.filename, filepath, channel_id, user_id))
-        
-        file_id = cur.fetchone()['id']
-        conn.commit()
-        cur.close()
-        conn.close()
-        
-        return {"filename": file.filename, "id": file_id}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/channels/{channel_id}/files")
-async def get_channel_files(channel_id: int):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, filename, uploaded_at, uploader_id
-        FROM shared_files
-        WHERE channel_id = %s
-        ORDER BY uploaded_at DESC
-    """, (channel_id,))
-    files = cur.fetchall()
-    cur.close()
-    conn.close()
-    return files
-
-@app.get("/api/files/{file_id}")
-async def download_file(file_id: int):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("SELECT filepath, filename FROM shared_files WHERE id = %s", (file_id,))
-    file_info = cur.fetchone()
-    cur.close()
-    conn.close()
-    
-    if not file_info:
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    return FileResponse(
-        file_info['filepath'], 
-        filename=file_info['filename'],
-        media_type='application/octet-stream'
-    )
-
-@app.get("/api/messages/{message_id}/file")
-async def get_message_file(message_id: int):
-    conn = get_db_connection()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT content, file_name 
-        FROM messages 
-        WHERE id = %s AND message_type = 'file'
-    """, (message_id,))
-    file_info = cur.fetchone()
-    cur.close()
-    conn.close()
-    
-    if not file_info:
-        raise HTTPException(status_code=404, detail="File not found")
-    
-    return FileResponse(
-        file_info['content'],
-        filename=file_info['file_name'],
-        media_type='application/octet-stream'
-    )
 
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=8000)
