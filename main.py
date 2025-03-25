@@ -98,6 +98,7 @@ class Skill(Base):
 class Submittable(Base):
     __tablename__ = "submittables"
     id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)  # Adding title field
     opens_at = Column(String, nullable=True)  # ISO 8601 format
     deadline = Column(String, nullable=False)  # ISO 8601 format
     description = Column(String, nullable=False)
@@ -2216,54 +2217,77 @@ async def submit_file(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Submit a file for a submittable"""
-    try:
-        # Get the submittable
-        submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
-        if not submittable:
-            raise HTTPException(status_code=404, detail="Submittable not found")
-        
-        # Check if submission is still open
-        now = datetime.now(timezone.utc)
-        deadline = datetime.fromisoformat(submittable.deadline.replace('Z', '+00:00'))
-        if now > deadline:
-            raise HTTPException(status_code=400, detail="Submission deadline has passed")
-        
-        # Get user's team
-        user = current_user["user"]
-        team = db.query(Team).filter(Team.id == user.team_id).first()
-        if not team:
-            raise HTTPException(status_code=400, detail="User is not part of a team")
-        
-        # Save the submitted file
-        file_extension = file.filename.split('.')[-1]
-        file_name = f"submission_{uuid.uuid4()}.{file_extension}"
-        file_path = f"uploads/{file_name}"
-        
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-        
-        # Create submission record with file information
-        new_submission = Submission(
-            team_id=team.id,
-            submittable_id=submittable_id,
-            file_url=f"/uploads/{file_name}",  # URL path
-            original_filename=file.filename
+    """
+    Submit a file for a submittable.
+    Only one submission per submittable per team is allowed.
+    """
+    # Get the submittable
+    submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
+    if not submittable:
+        raise HTTPException(status_code=404, detail="Submittable not found")
+
+    # Get the user's team
+    user = db.query(User).filter(User.id == current_user["user"].id).first()
+    if not user or not user.team_id:
+        raise HTTPException(status_code=400, detail="User must be part of a team to submit")
+
+    # Check if team already has a submission
+    existing_submission = db.query(Submission).filter(
+        Submission.team_id == user.team_id,
+        Submission.submittable_id == submittable_id
+    ).first()
+
+    if existing_submission:
+        raise HTTPException(
+            status_code=400, 
+            detail="Your team has already submitted a file for this submittable. Please delete the existing submission first."
         )
-        
-        db.add(new_submission)
-        db.commit()
-        db.refresh(new_submission)
-        
-        return JSONResponse(status_code=201, content={
-            "message": "File submitted successfully",
-            "submission_id": new_submission.id
-        })
-    except HTTPException as he:
-        raise he
+
+    # Check if submission is allowed based on opens_at and deadline
+    now = datetime.now(timezone.utc)
+    opens_at = datetime.fromisoformat(submittable.opens_at) if submittable.opens_at else None
+    deadline = datetime.fromisoformat(submittable.deadline)
+
+    if opens_at and now < opens_at:
+        raise HTTPException(status_code=400, detail="Submission period has not started yet")
+    if now > deadline:
+        raise HTTPException(status_code=400, detail="Submission deadline has passed")
+
+    # Generate a unique filename
+    file_extension = os.path.splitext(file.filename)[1]
+    unique_filename = f"submission_{uuid.uuid4()}{file_extension}"
+    file_path = os.path.join("uploads", unique_filename)
+
+    # Save the file
+    try:
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
     except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error submitting file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+
+    # Create submission record
+    submission = Submission(
+        team_id=user.team_id,
+        file_url=file_path,
+        original_filename=file.filename,
+        submittable_id=submittable_id
+    )
+
+    try:
+        db.add(submission)
+        db.commit()
+        db.refresh(submission)
+        return {
+            "message": "File submitted successfully",
+            "submission_id": submission.id,
+            "original_filename": submission.original_filename
+        }
+    except Exception as e:
+        # If database operation fails, delete the uploaded file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=500, detail=f"Failed to create submission record: {str(e)}")
 
 @app.get("/submissions/{submission_id}/download")
 async def download_submission(
@@ -2311,65 +2335,62 @@ async def get_submittables(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get all submittables with their status (upcoming, open, closed) and submission status for students"""
+    """Get all submittables categorized by status"""
     try:
+        # Get all submittables
         submittables = db.query(Submittable).all()
-        now = datetime.now(timezone.utc)
+        
+        # Get user's team submissions
         user = current_user["user"]
-        role = current_user["role"]
+        team_submissions = {}
+        if user.team_id:
+            submissions = db.query(Submission).filter(Submission.team_id == user.team_id).all()
+            team_submissions = {s.submittable_id: s for s in submissions}
         
-        result = {
-            "upcoming": [],
-            "open": [],
-            "closed": []
-        }
-        
-        for submittable in submittables:
-            opens_at = datetime.fromisoformat(submittable.opens_at.replace('Z', '+00:00')) if submittable.opens_at else None
-            deadline = datetime.fromisoformat(submittable.deadline.replace('Z', '+00:00'))
-            
-            submittable_data = {
-                "id": submittable.id,
-                "description": submittable.description,
-                "deadline": submittable.deadline,
-                "reference_file": {
-                    "file_url": submittable.file_url,
-                    "original_filename": submittable.original_filename
-                } if submittable.file_url else None
+        # Helper function to format submittable
+        def format_submittable(s):
+            submission = team_submissions.get(s.id)
+            return {
+                "id": s.id,
+                "title": s.title,  # Ensure title is included
+                "description": s.description,
+                "opens_at": s.opens_at,
+                "deadline": s.deadline,
+                "reference_files": [{
+                    "id": 1,  # Using a placeholder ID for now
+                    "original_filename": s.original_filename
+                }] if s.file_url else [],
+                "submission_status": {
+                    "has_submitted": bool(submission),
+                    "submission_id": submission.id if submission else None,
+                    "submitted_on": submission.submitted_on if submission else None,
+                    "original_filename": submission.original_filename if submission else None
+                }
             }
-            
-            # Add submission status for students
-            if role == RoleType.STUDENT and user.team_id:
-                submission = db.query(Submission).filter(
-                    Submission.submittable_id == submittable.id,
-                    Submission.team_id == user.team_id
-                ).first()
-                
-                if submission:
-                    submittable_data["submission_status"] = {
-                        "has_submitted": True,
-                        "submission_id": submission.id,
-                        "submitted_on": submission.submitted_on,
-                        "file_url": submission.file_url,
-                        "original_filename": submission.original_filename
-                    }
-                else:
-                    submittable_data["submission_status"] = {
-                        "has_submitted": False,
-                        "submission_id": None,
-                        "submitted_on": None,
-                        "file_url": None,
-                        "original_filename": None
-                    }
-            
+
+        # Categorize submittables
+        now = datetime.now(timezone.utc)
+        upcoming = []
+        open_submittables = []
+        closed = []
+
+        for s in submittables:
+            formatted = format_submittable(s)
+            opens_at = datetime.fromisoformat(s.opens_at) if s.opens_at else None
+            deadline = datetime.fromisoformat(s.deadline)
+
             if opens_at and now < opens_at:
-                result["upcoming"].append(submittable_data)
-            elif now <= deadline:
-                result["open"].append(submittable_data)
+                upcoming.append(formatted)
+            elif now > deadline:
+                closed.append(formatted)
             else:
-                result["closed"].append(submittable_data)
-        
-        return JSONResponse(status_code=200, content=result)
+                open_submittables.append(formatted)
+
+        return {
+            "upcoming": upcoming,
+            "open": open_submittables,
+            "closed": closed
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submittables: {str(e)}")
 
@@ -2381,47 +2402,53 @@ async def download_reference_file(
 ):
     """Download a reference file for a submittable"""
     try:
+        # Get the submittable
         submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
         if not submittable:
             raise HTTPException(status_code=404, detail="Submittable not found")
-        
-        # Convert URL path to local path
-        local_path = submittable.file_url.lstrip('/')
-        if not os.path.exists(local_path):
-            raise HTTPException(status_code=404, detail="Reference file not found")
-        
+
+        if not submittable.file_url:
+            raise HTTPException(status_code=404, detail="No reference file found")
+
+        # Check if file exists
+        if not os.path.exists(submittable.file_url):
+            raise HTTPException(status_code=404, detail="File not found on server")
+
+        # Return the file
         return FileResponse(
-            local_path,
-            filename=submittable.original_filename,
-            media_type="application/octet-stream"
+            submittable.file_url,
+            media_type='application/octet-stream',
+            filename=submittable.original_filename
         )
+
     except HTTPException as he:
         raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error downloading reference file: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
 class SubmittableCreateRequest(BaseModel):
+    title: str
     opens_at: Optional[str] = None  # ISO 8601 format
     deadline: str  # ISO 8601 format
     description: str
-    
+
     @validator('deadline')
     def validate_deadline(cls, v):
         try:
-            datetime.fromisoformat(v.replace('Z', '+00:00'))
+            datetime.fromisoformat(v)
             return v
         except ValueError:
-            raise ValueError("Invalid deadline format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
-    
+            raise ValueError("Invalid ISO 8601 format for deadline")
+
     @validator('opens_at')
     def validate_opens_at(cls, v):
-        if v:
-            try:
-                datetime.fromisoformat(v.replace('Z', '+00:00'))
-                return v
-            except ValueError:
-                raise ValueError("Invalid opens_at format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
-        return v
+        if v is None:
+            return v
+        try:
+            datetime.fromisoformat(v)
+            return v
+        except ValueError:
+            raise ValueError("Invalid ISO 8601 format for opens_at")
 
 @app.post("/submittables/create")
 async def create_submittable(
@@ -2450,6 +2477,7 @@ async def create_submittable(
 
         # Create submittable in database with file information
         new_submittable = Submittable(
+            title=submittable.title,
             opens_at=submittable.opens_at,
             deadline=submittable.deadline,
             description=submittable.description,
@@ -2484,6 +2512,7 @@ async def get_submittable(
         
         return JSONResponse(status_code=200, content={
             "id": submittable.id,
+            "title": submittable.title,
             "opens_at": submittable.opens_at,
             "deadline": submittable.deadline,
             "description": submittable.description,
@@ -2629,13 +2658,20 @@ async def update_submittable(
 async def delete_submission(
     submission_id: int,
     db: Session = Depends(get_db),
-    token: str = Depends(prof_required)
+    current_user: dict = Depends(get_current_user)
 ):
-    """Delete a submission (professors only)"""
+    """Delete a submission (professors or the submitting student)"""
     try:
         submission = db.query(Submission).filter(Submission.id == submission_id).first()
         if not submission:
             raise HTTPException(status_code=404, detail="Submission not found")
+        
+        # Check if user is professor or the student who submitted
+        user = current_user["user"]
+        if current_user["role"] != RoleType.PROF:
+            # For students, check if they belong to the team that submitted
+            if user.team_id != submission.team_id:
+                raise HTTPException(status_code=403, detail="You can only delete your own submissions")
         
         # Delete the submission file if it exists
         if submission.file_url:
