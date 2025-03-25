@@ -673,20 +673,43 @@ create_default_admin()
 # Authentication endpoints
 @app.post("/login")
 def login(request: Annotated[OAuth2PasswordRequestForm, Depends()], db: Session = Depends(get_db)):
-# def login(request: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.username == request.username).first()
-    
-    # Verify credentials
-    if not user or not verify_password(request.password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    try:
+        user = db.query(User).filter(User.username == request.username).first()
+        
+        # Verify credentials
+        if not user or not verify_password(request.password, user.hashed_password):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, 
+                detail="Invalid username or password"
+            )
 
-    # Get the role
-    role = db.query(Role).filter(Role.id == user.role_id).first().role
-    
-    # Generate token
-    token = generate_token({"sub": user.username}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-    
-    return {"access_token": token, "token_type": "bearer", "role": role}
+        # Get the role
+        role = db.query(Role).filter(Role.id == user.role_id).first()
+        if not role:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
+                detail="User role not found"
+            )
+        
+        # Generate token
+        token = generate_token(
+            {"sub": user.username}, 
+            timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        )
+        
+        return {
+            "access_token": token,
+            "token_type": "bearer",
+            "role": role.role.value
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Login error: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error"
+        )
 
 @app.post("/reset-password")
 def reset_password(
@@ -1691,7 +1714,7 @@ async def assign_skills_to_team(request: AssignTeamSkillsRequest, db: Session = 
 @app.get("/gradeables/")
 async def get_gradeable_table(
     db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
+    #token: str = Depends(prof_or_ta_required)
 ):
     """
     Get the gradeable table for professors and TAs
