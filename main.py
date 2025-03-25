@@ -2020,60 +2020,6 @@ def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
     
     return scores
 
-@app.get("/gradeables/{gradeable_id}/upload-scores")
-async def upload_gradeable_scores(
-    gradeable_id: int,
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
-):
-    """
-    Upload scores for a specific gradeable
-    """
-    # Ensure the file is a CSV
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only CSV files are allowed"
-        )
-    
-    try:
-        # Read file content
-        content = await file.read()
-        content_str = content.decode('utf-8')
-        
-        # Parse CSV content
-        scores = parse_scores_from_csv(content_str)
-        
-        # Update scores in the database
-        for score in scores:
-            submission = db.query(GradeableScores).filter(
-                GradeableScores.gradeable_id == gradeable_id,
-                GradeableScores.user_id == score["user_id"]
-            ).first()
-            
-            if submission:
-                submission.score = score["score"]
-                submission.submitted_at = datetime.now(timezone.utc).isoformat()
-            else:
-                new_submission = GradeableScores(
-                    user_id=score["user_id"],
-                    gradeable_id=gradeable_id,
-                    score=score["score"],
-                    submitted_at=datetime.now(timezone.utc).isoformat()
-                )
-                db.add(new_submission)
-        
-        db.commit()
-        
-        return JSONResponse(status_code=200, content={
-            "message": "Scores uploaded successfully",
-            "gradeable_id": gradeable_id,
-            "total_submissions": len(scores)
-        })
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error uploading scores: {str(e)}")
 
 
 @app.post("/submittables/{submittable_id}/submit")
