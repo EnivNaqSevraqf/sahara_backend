@@ -640,7 +640,7 @@ def create_default_admin():
 # Authentication
 ###
 
-SECRET_KEY = secrets.token_hex(32)
+SECRET_KEY = "a3eca18b09973b1890cfbc94d5322c1aae378b73ea5eee0194ced065175d04aa"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -698,6 +698,30 @@ def get_verified_user(token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has expired")
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
+def get_current_user_from_string(token: str, db: Session):
+    print("In here")
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except jwt.PyJWTError:
+        raise credentials_exception
+    
+    user = db.query(User).filter(User.username == username).first()
+    if user is None:
+        raise credentials_exception
+    
+    role = db.query(Role).filter(Role.id == user.role_id).first().role
+    
+    return {"user": user, "role": role}
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
@@ -793,7 +817,7 @@ def login(request: Annotated[OAuth2PasswordRequestForm, Depends()], db: Session 
         # Generate token
         token = generate_token(
             {"sub": user.username}, 
-            timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+            timedelta(days=1)
         )
         
         return {
@@ -2978,27 +3002,78 @@ async def send_message(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.websocket("/discussions/ws/{channel_id}")
+@app.websocket("/discussions/ws/{channel_id}/{token}")
 async def websocket_endpoint(
     websocket: WebSocket, 
     channel_id: int, 
-    current_user_data: dict = Depends(get_current_user),
+    #user_id: int,
+    token: str,
+    # current_user_data: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # print("In here")
+    current_user_data = get_current_user_from_string(token , db)
+    if not current_user_data:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
     user = current_user_data["user"]
     
     # Validate user's access to the channel
+    print(f"User: {user.username}, Channel ID: {channel_id}")
     if not validate_channel_access(user, channel_id, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this channel"
         )
 
-    await manager.connect(websocket, channel_id, user["id"])
+    #await manager.connect(websocket, channel_id, int(token))
+    
+
+    await manager.connect(websocket, channel_id, user.id)
     try:
         while True:
             data = await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket, channel_id)
 
-
+@app.get("/discussions/download/{file_name}")
+async def download_file(
+    file_name: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Download a file and return it as base64 encoded data"""
+    try:
+        # Get the file record from the database
+        file_record = db.query(Message).filter(Message.file_name == file_name).first()
+        if not file_record:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Check if the user has access to the file
+        user = current_user["user"]
+        if not validate_channel_access(user, file_record.channel_id, db):
+            raise HTTPException(status_code=403, detail="Not authorized to download this file")
+        # Check if the file is a reference file
+        if file_record.message_type != 'file':
+            raise HTTPException(status_code=400, detail="Not a reference file")
+        
+        # Convert URL path to local path
+        local_path = file_record.file_name.lstrip('/')
+        local_path = os.path.join("forums_uploads", local_path)
+        # Check if the file exists locally
+        if not os.path.exists(local_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Read the file and encode it in base64
+        with open(local_path, "rb") as file:
+            file_data = file.read()
+            encoded_file_data = base64.b64encode(file_data).decode('utf-8')
+        
+        return JSONResponse(status_code=200, content={
+            "file_id": file_record.id,
+            "original_filename": file_record.file_name,
+            "file_data": encoded_file_data
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
