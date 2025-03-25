@@ -24,7 +24,7 @@ import traceback
 from typing import Optional, List
 import sys
 import importlib.util
-from typing import Optional, List, Annotated
+from typing import Optional, List, Annotated, Union
 import shutil
 import uuid
 import json
@@ -1144,36 +1144,48 @@ class Show(BaseModel):
 async def create(
     title: Annotated[str, Form()],
     description: Annotated[str, Form()],
-    file: UploadFile | None = None,
+    file: Union[UploadFile, None] = None,
     db: Session = Depends(get_db),
-    #current_user: dict = Depends(get_current_user)
 ):
-    file_location = None
-    if file:
-        file_extension = file.filename.split('.')[-1]
-        file_name = f"{uuid.uuid4()}.{file_extension}"
-        file_location = f"uploads/{file_name}"
-        with open(file_location, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
     try:
-        description_json = json.loads(description)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
-    
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    new_announcement = Announcement(
-        creator_id=1,
-        created_at=current_time,
-        title=title,
-        content=description_json,
-        url_name=file_location if file_location else None
-    )
-    db.add(new_announcement)
-    db.commit()
-    db.refresh(new_announcement)
-    return new_announcement
+        # Handle file upload if provided
+        file_location = None
+        if file and file.filename:
+            file_extension = file.filename.split('.')[-1]
+            file_name = f"{uuid.uuid4()}.{file_extension}"
+            file_location = f"uploads/{file_name}"
+            with open(file_location, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+
+        # Parse description JSON
+        try:
+            description_json = json.loads(description)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
+        
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Create new announcement
+        new_announcement = Announcement(
+            creator_id=1,
+            created_at=current_time,
+            title=title,
+            content=description_json,
+            url_name=file_location
+        )
+        
+        db.add(new_announcement)
+        db.commit()
+        db.refresh(new_announcement)
+        
+        return new_announcement
+        
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        if file_location and os.path.exists(file_location):
+            os.remove(file_location)  # Clean up file if something went wrong
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
 
 @app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
