@@ -1985,11 +1985,12 @@ async def get_gradeable_table(
     for gradeable in gradeables:
         results.append({
             "id": gradeable.id,
-            "name": gradeable.name,
+            "title": gradeable.title,
             "description": gradeable.description,
             "due_date": gradeable.due_date,
-            "created_at": gradeable.created_at,
-            "updated_at": gradeable.updated_at
+            "max_points": gradeable.max_points,
+            "creator_id": gradeable.creator_id,
+            "created_at": gradeable.created_at
         })
     return JSONResponse(status_code=200, content=results)
 
@@ -1997,7 +1998,7 @@ async def get_gradeable_table(
 async def get_gradeable_by_id(
     gradeable_id: int,
     db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
+    # token: str = Depends(prof_or_ta_required)
 ):
     """
     Get a specific gradeable by ID
@@ -2008,17 +2009,18 @@ async def get_gradeable_by_id(
     
     return JSONResponse(status_code=200, content={
         "id": gradeable.id,
-        "name": gradeable.name,
+        "title": gradeable.title,
         "description": gradeable.description,
         "due_date": gradeable.due_date,
         "created_at": gradeable.created_at,
-        "updated_at": gradeable.updated_at
+
+        #"updated_at": gradeable.updated_at
     })
 @app.get("/gradeables/{gradeable_id}/scores")
 async def get_gradeable_submissions(
     gradeable_id: int,
     db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
+    # token: str = Depends(prof_or_ta_required)
 ):
     """
     Get all submissions for a specific gradeable
@@ -2028,9 +2030,10 @@ async def get_gradeable_submissions(
     for submission in submissions:
         results.append({
             "id": submission.id,
-            "user_id": submission.user_id,
             "gradeable_id": submission.gradeable_id,
-            "submitted_at": submission.submitted_at,
+            "user_id": submission.user_id, 
+            "name": submission.user.name,
+            #"submitted_at": submission.submitted_at,
             "score": submission.score
         })
     return JSONResponse(status_code=200, content=results)
