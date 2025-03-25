@@ -345,7 +345,7 @@ class TeamCalendarEvent(Base):
             raise ValueError("Students cannot create calendar events.")
         return value
     
-class TeamTA(Base):
+class Team_TA(Base):
     __tablename__ = "team_tas"
     id = Column(Integer, primary_key=True)
     team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
@@ -1358,13 +1358,13 @@ async def create_match(n: int, db: Session = Depends(get_db)):
         allocations = get_allocation(n, db)
         
         # Clear existing team_tas entries
-        db.query(TeamTA).delete()
+        db.query(Team_TA).delete()
         
         # Insert new allocations
         for allocation in allocations:
             team_id = allocation["team_id"]
             for ta_id in allocation["assigned_ta_ids"]:
-                new_team_ta = TeamTA(
+                new_team_ta = Team_TA(
                     team_id=team_id,
                     ta_id=ta_id
                 )
