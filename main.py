@@ -2,7 +2,7 @@ import json
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime
+from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, validates
 from sqlalchemy.dialects.postgresql import JSONB, insert
@@ -75,7 +75,6 @@ user_skills = Table(
     Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
     Column("skill_id", Integer, ForeignKey("skills.id"), primary_key=True)
 )
-
 # Association table for Team-Skills many-to-many relationship
 team_skills = Table(
     "team_skills", Base.metadata,
@@ -346,7 +345,7 @@ class TeamCalendarEvent(Base):
             raise ValueError("Students cannot create calendar events.")
         return value
     
-class Team_TA(Base):
+class TeamTA(Base):
     __tablename__ = "team_tas"
     id = Column(Integer, primary_key=True)
     team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
@@ -375,6 +374,12 @@ class Message(Base):
 
     sender = relationship("User", back_populates="messages")
     channel = relationship("Channel", back_populates="messages")
+
+class TeamSkill(Base):
+    __tablename__ = "team_skills"
+
+class UserSkill(Base):
+    __tablename__ = "user_skills"
 
 def get_db():
     db = SessionLocal()
@@ -1290,6 +1295,121 @@ def get_forms():
 def create_form():
     pass
 
+class TABase(BaseModel):
+    name: str
+    skills: List[str]
+
+class TeamBase(BaseModel):
+    team_name: str
+    skills: List[str]
+
+class TADisplay(TABase):
+    id: int
+    class Config:
+        orm_mode = True
+
+class TeamDisplay(TeamBase):
+    id: int
+    class Config:
+        orm_mode = True
+
+class AllocationResponse(BaseModel):
+    team_id: int
+    required_skill_ids: List[int]
+    assigned_ta_ids: List[int]
+
+
+def get_allocation(n: int, db: Session):
+    # Get all teams and their skills
+    teams = db.query(Team).all()
+    allocations = []
+    
+    for team in teams:
+        # Get team's required skills
+        team_skills = db.query(TeamSkill.skill_id).filter(
+            TeamSkill.team_id == team.id
+        ).all()
+        team_skill_ids = [skill[0] for skill in team_skills]
+        
+        # Find TAs with matching skills
+        tas = db.query(User).join(
+            UserSkill,
+            User.id == UserSkill.user_id
+        ).filter(
+            UserSkill.skill_id.in_(team_skill_ids),
+            User.role_id == 2  # Assuming role_id 2 is for TAs
+        ).distinct().limit(n).all()
+        
+        allocation = {
+            "team_id": team.id,
+            "assigned_ta_ids": [ta.id for ta in tas]
+        }
+        allocations.append(allocation)
+    
+    return allocations
+
+@app.get("/match/{n}", response_model=dict)
+async def create_match(n: int, db: Session = Depends(get_db)):
+    if n <= 0:
+        raise HTTPException(status_code=400, detail="Number of TAs per team must be positive")
+    
+    try:
+        # Get allocations using matching algorithm
+        allocations = get_allocation(n, db)
+        
+        # Clear existing team_tas entries
+        db.query(TeamTA).delete()
+        
+        # Insert new allocations
+        for allocation in allocations:
+            team_id = allocation["team_id"]
+            for ta_id in allocation["assigned_ta_ids"]:
+                new_team_ta = TeamTA(
+                    team_id=team_id,
+                    ta_id=ta_id
+                )
+                db.add(new_team_ta)
+        
+        db.commit()
+        return {"message": "allocation is done"}
+    
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/match", response_model=dict)
+async def get_match(db: Session = Depends(get_db)):
+    try:
+        results = db.execute(text("""
+            SELECT 
+                t.id as team_id,
+                t.name as team_name,
+                u.id as ta_id,
+                u.name as ta_name
+            FROM teams t
+            JOIN team_tas tt ON t.id = tt.team_id
+            JOIN users u ON tt.ta_id = u.id
+            ORDER BY t.id, u.id
+        """)).fetchall()
+        
+        teams_dict = {}
+        for row in results:
+            team_id = row[0]
+            if team_id not in teams_dict:
+                teams_dict[team_id] = {
+                    "team_id": team_id,
+                    "team_name": row[1],
+                    "tas": []
+                }
+            teams_dict[team_id]["tas"].append({
+                "ta_id": row[2],
+                "ta_name": row[3]
+            })
+        
+        return {"teams": list(teams_dict.values())}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # Calendar
 
@@ -2849,3 +2969,5 @@ async def websocket_endpoint(
             data = await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket, channel_id)
+
+
