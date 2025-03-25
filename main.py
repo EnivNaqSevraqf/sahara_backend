@@ -519,6 +519,12 @@ class TempRegisterRequest(BaseModel):
     confirm_password: str
     role: RoleType
 
+class SkillRequest(BaseModel):
+    name: str
+    bgColor: str
+    fgColor: str
+    icon: str
+
 # Form-related Pydantic models
 class FormCreateRequest(BaseModel):
     title: str
@@ -1795,6 +1801,42 @@ async def assign_skills_to_team(request: AssignTeamSkillsRequest, db: Session = 
         raise HTTPException(status_code=500, detail=f"Error assigning skills to team: {str(e)}")
 
 
+@app.post("/create-skill")
+def create_skill( skill_req: SkillRequest):
+    return {"bgColor" : skill_req.bgColor}
+
+
+@app.get("/teams/FormedTeams")
+def setFormedTeams(db: Session = Depends(get_db)):
+    teams = db.query(Team).all()
+
+    return_data = []
+    for team in teams:
+        team_data = {
+            "number": team.id,
+            "name": team.name,
+            "details": "",  # Add details if needed
+            "members": [member.name for member in team.members]  # Extract member names
+        }
+        return_data.append(team_data)
+
+    return return_data
+
+@app.get("/teams/betaTestPairs")
+def setbetaTestPairs(db: Session = Depends(get_db)):
+    teams = db.query(Team).all()
+
+    return_data = []
+    for team in teams:
+        team_data = {
+            "number": team.id,
+            "name": team.name,
+            "details": "",  # Add details if needed
+            "members": [member.name for member in team.members]  # Extract member names
+        }
+        return_data.append(team_data)
+
+    return return_data
 
 @app.get("/gradeables/")
 async def get_gradeable_table(
