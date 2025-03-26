@@ -1,5 +1,6 @@
 import json
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, WebSocket, WebSocketDisconnect, WebSocketException
+# Explicitly import FastAPI's Form and rename it to avoid conflicts
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, Form as FastAPIForm, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text
@@ -112,9 +113,10 @@ class Submittable(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role.role != RoleType.PROF:
-            raise ValueError("Only professors can create submittables.")
+        with SessionLocal() as db:
+            user = db.query(User).filter_by(id=value).first()
+            if user and user.role.role != RoleType.PROF:
+                raise ValueError("Only professors can create submittables.")
         return value
 
 class Submission(Base):
@@ -186,9 +188,10 @@ class Form(Base):
     @validates("target_type", "target_id")
     def validate_target(self, key, value):
         if self.target_type == RoleType.ROLE:
-            role = SessionLocal.query(Role).filter_by(id=self.target_id).first()
-            if role and role.name == RoleType.PROFESSOR:
-                raise ValueError("Forms cannot be assigned to Professors.")
+            with SessionLocal() as session:
+                role = session.query(Role).filter_by(id=self.target_id).first()
+                if role and role.name == RoleType.PROFESSOR:
+                    raise ValueError("Forms cannot be assigned to Professors.")
         return value
 
 team_members = Table(
@@ -204,7 +207,7 @@ class Announcement(Base):
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     title = Column(String, nullable=False)
-    content = Column(JSONB, nullable=False)
+    content = Column(String, nullable=False)  # Changed from JSONB to String
     url_name = Column(String, unique=True, nullable=True)
     
     @validates("creator_id")
@@ -233,8 +236,8 @@ class Gradeable(Base):
     __tablename__ = "gradeables"
     id = Column(Integer, primary_key=True)
     title = Column(String, nullable=False)
-    description = Column(String, nullable=False)
-    due_date = Column(String, nullable=False)
+    #description = Column(String, nullable=True)
+    #due_date = Column(String, nullable=False)
     max_points = Column(Integer, nullable=False)
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
@@ -244,10 +247,11 @@ class Gradeable(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role == RoleType.STUDENT:
-            raise ValueError("Students cannot create gradeables.")
-        return value
+        with SessionLocal() as session:
+            user = session.query(User).filter_by(id=value).first()
+            if user and user.role == RoleType.STUDENT:
+                raise ValueError("Students cannot create gradeables.")
+            return value
     
 class GradeableScores(Base):
     __tablename__ = "gradeable_scores"
@@ -255,7 +259,7 @@ class GradeableScores(Base):
     gradeable_id = Column(Integer, ForeignKey("gradeables.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     score = Column(Integer, nullable=False)
-    feedback = Column(String, nullable=True)
+    #feedback = Column(String, nullable=True)
 
     gradeable = relationship("Gradeable", back_populates="scores")
     user = relationship("User", back_populates="gradeable_scores")
@@ -294,10 +298,11 @@ class UserCalendarEvent(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role == RoleType.STUDENT:
-            raise ValueError("Students cannot create calendar events.")
-        return value
+        with SessionLocal() as session:
+            user = session.query(User).filter_by(id=value).first()
+            if user and user.role == RoleType.STUDENT:
+                raise ValueError("Students cannot create calendar events.")
+            return value
 
 class TeamCalendarEvent(Base):
     __tablename__ = "team_calendar_events"
@@ -313,10 +318,11 @@ class TeamCalendarEvent(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role == RoleType.STUDENT:
-            raise ValueError("Students cannot create calendar events.")
-        return value
+        with SessionLocal() as session:
+            user = session.query(User).filter_by(id=value).first()
+            if user and user.role == RoleType.STUDENT:
+                raise ValueError("Students cannot create calendar events.")
+            return value
     
 class Team_TA(Base):
     __tablename__ = "team_tas"
@@ -555,18 +561,18 @@ class AssignTeamSkillsRequest(BaseModel):
 
 class GradeableCreateRequest(BaseModel):
     title: str
-    description: str
-    due_date: str  # ISO 8601 format
+    #description: str
+    #due_date: str  # ISO 8601 format
     max_points: int
     
-    @validator('due_date')
-    def validate_due_date(cls, v):
-        try:
-            # Validate ISO 8601 format
-            datetime.fromisoformat(v.replace('Z', '+00:00'))
-            return v
-        except ValueError:
-            raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
+    # @validator('due_date')
+    # def validate_due_date(cls, v):
+    #     try:
+    #         # Validate ISO 8601 format
+    #         datetime.fromisoformat(v.replace('Z', '+00:00'))
+    #         return v
+    #     except ValueError:
+    #         raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
             
     @validator('max_points')
     def validate_max_points(cls, v):
@@ -640,7 +646,7 @@ def create_default_admin():
 # Authentication
 ###
 
-SECRET_KEY = secrets.token_hex(32)
+SECRET_KEY = "a3eca18b09973b1890cfbc94d5322c1aae378b73ea5eee0194ced065175d04aa"
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -679,11 +685,6 @@ def resolve_token(token: str = Header(None)):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-def check_user_permitted(user_id: int, role: RoleType):
-    user = SessionLocal.query(User).filter_by(id=user_id).first()
-    if user.role.role != role:
-        raise HTTPException(status_code=403, detail="User does not have permission to access this resource")
-
 # Authentication dependencies
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
@@ -698,6 +699,30 @@ def get_verified_user(token: str = Depends(oauth2_scheme)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token has expired")
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
+def get_current_user_from_string(token: str, db: Session):
+    print("In here")
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except jwt.PyJWTError:
+        raise credentials_exception
+    
+    user = db.query(User).filter(User.username == username).first()
+    if user is None:
+        raise credentials_exception
+    
+    role = db.query(Role).filter(Role.id == user.role_id).first().role
+    
+    return {"user": user, "role": role}
 
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     credentials_exception = HTTPException(
@@ -747,12 +772,11 @@ def prof_or_ta_required(token: str = Depends(oauth2_scheme), db: Session = Depen
         username = payload.get("sub")
         if not username:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
-            
+        
         # Check if user exists
         user = db.query(User).filter(User.username == username).first()
         if not user:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
-            
         # Check if user is a professor or TA
         role = db.query(Role).filter(Role.id == user.role_id).first()
         if role.role not in [RoleType.PROF, RoleType.TA]:
@@ -760,7 +784,6 @@ def prof_or_ta_required(token: str = Depends(oauth2_scheme), db: Session = Depen
                 status_code=status.HTTP_403_FORBIDDEN, 
                 detail="Not authorized, professor or TA access required"
             )
-            
         return payload
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
@@ -793,7 +816,7 @@ def login(request: Annotated[OAuth2PasswordRequestForm, Depends()], db: Session 
         # Generate token
         token = generate_token(
             {"sub": user.username}, 
-            timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+            timedelta(days=1)
         )
         
         return {
@@ -1159,7 +1182,7 @@ class Show(BaseModel):
     creator_id: int
     created_at: str
     title: str
-    content: dict
+    content: str
     url_name: Optional[str] = None
 
     class Config:
@@ -1167,68 +1190,93 @@ class Show(BaseModel):
 
 @app.post('/announcements', status_code=status.HTTP_201_CREATED)
 async def create(
-    title: Annotated[str, Form()],
-    description: Annotated[str, Form()],
-    file: Union[UploadFile, None] = None,
-    db: Session = Depends(get_db),
+    title: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
 ):
     try:
-        # Handle file upload if provided
-        file_location = None
-        if file and file.filename:
-            file_extension = file.filename.split('.')[-1]
-            file_name = f"{uuid.uuid4()}.{file_extension}"
-            file_location = f"uploads/{file_name}"
-            with open(file_location, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-
-        # Parse description JSON
-        try:
-            description_json = json.loads(description)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
+        # Create file path
+        file_extension = os.path.splitext(file.filename)[1]
+        file_name = f"{uuid.uuid4()}{file_extension}"
+        file_path = os.path.join("uploads", file_name)
         
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Ensure uploads directory exists
+        os.makedirs("uploads", exist_ok=True)
         
-        # Create new announcement
-        new_announcement = Announcement(
-            creator_id=1,
-            created_at=current_time,
+        # Save the file
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        # Create announcement in database
+        db_announcement = Announcement(
             title=title,
-            content=description_json,
-            url_name=file_location
+            content=description,
+            url_name=file_name,
+            creator_id=1  # Default creator ID
         )
-        
-        db.add(new_announcement)
+        db.add(db_announcement)
         db.commit()
-        db.refresh(new_announcement)
+        db.refresh(db_announcement)
         
-        return new_announcement
-        
-    except HTTPException as e:
-        raise e
+        return db_announcement
     except Exception as e:
-        if file_location and os.path.exists(file_location):
-            os.remove(file_location)  # Clean up file if something went wrong
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
+@app.get('/announcements/{announcement_id}/download')
+async def download_announcement_file(
+    announcement_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == announcement_id).first()
+        if not announcement or not announcement.url_name:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        file_path = os.path.join("uploads", announcement.url_name)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return FileResponse(
+            file_path,
+            filename=announcement.url_name,
+            media_type='application/octet-stream'
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
-def destroy(id:int, db:Session=Depends(get_db)):
-    blog=db.query(Announcement).filter(Announcement.id==id)
-    if not blog.first():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
-    if blog.first().url_name and os.path.exists(blog.first().url_name):  # Changed from file_path to url_name
-        os.remove(blog.first().url_name)
-    blog.delete(synchronize_session=False)
-    db.commit()
-    return 'done'
+@app.get('/announcements', response_model=List[Show])
+def all(db: Session = Depends(get_db)):
+    announcements = db.query(Announcement).order_by(Announcement.created_at.desc()).all()
+    return announcements
+
+@app.delete('/announcements/{announcement_id}')
+def destroy(announcement_id: int, db: Session = Depends(get_db)):
+    announcement = db.query(Announcement).filter(Announcement.id == announcement_id).first()
+    if not announcement:
+        raise HTTPException(status_code=404, detail="Announcement not found")
+    
+    try:
+        # Delete the associated file if it exists
+        if announcement.url_name:
+            file_path = os.path.join("uploads", announcement.url_name)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        
+        # Delete the announcement from database
+        db.delete(announcement)
+        db.commit()
+        return {"message": "Announcement deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting announcement: {str(e)}")
 
 @app.put('/announcements/{id}', status_code=status.HTTP_202_ACCEPTED)
 def update(
     id: int,
     title: Annotated[str, Form()],
-    description: Annotated[str, Form()],
+    description: Annotated[str, Form()],  # Now expects plain text
     file: UploadFile | None = None,
     db: Session = Depends(get_db)
 ):
@@ -1247,19 +1295,26 @@ def update(
         with open(new_url_name, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     
-    try:
-        description_json = json.loads(description)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
-    
     # Update only the modifiable fields
     announcement.first().title = title
-    announcement.first().content = description_json
+    announcement.first().content = description  # Store description directly as string
     announcement.first().url_name = new_url_name
 
     db.commit()
     db.refresh(announcement.first())
     return {"detail": "Announcement updated", "announcement": announcement.first()}
+
+@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
+def destroy(id:int, db:Session=Depends(get_db)):
+    blog=db.query(Announcement).filter(Announcement.id==id)
+    if not blog.first():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
+    if blog.first().url_name and os.path.exists(blog.first().url_name):  # Changed from file_path to url_name
+        os.remove(blog.first().url_name)
+    blog.delete(synchronize_session=False)
+    db.commit()
+    return 'done'
+
 
 @app.get('/announcements', response_model=List[Show])
 def all(db:Session = Depends(get_db)):
@@ -1975,7 +2030,7 @@ def setbetaTestPairs(db: Session = Depends(get_db)):
 @app.get("/gradeables/")
 async def get_gradeable_table(
     db: Session = Depends(get_db),
-    #token: str = Depends(prof_or_ta_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """
     Get the gradeable table for professors and TAs
@@ -1986,11 +2041,8 @@ async def get_gradeable_table(
         results.append({
             "id": gradeable.id,
             "title": gradeable.title,
-            "description": gradeable.description,
-            "due_date": gradeable.due_date,
             "max_points": gradeable.max_points,
             "creator_id": gradeable.creator_id,
-            "created_at": gradeable.created_at
         })
     return JSONResponse(status_code=200, content=results)
 
@@ -1998,7 +2050,7 @@ async def get_gradeable_table(
 async def get_gradeable_by_id(
     gradeable_id: int,
     db: Session = Depends(get_db),
-    # token: str = Depends(prof_or_ta_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """
     Get a specific gradeable by ID
@@ -2010,17 +2062,12 @@ async def get_gradeable_by_id(
     return JSONResponse(status_code=200, content={
         "id": gradeable.id,
         "title": gradeable.title,
-        "description": gradeable.description,
-        "due_date": gradeable.due_date,
-        "created_at": gradeable.created_at,
-
-        #"updated_at": gradeable.updated_at
     })
 @app.get("/gradeables/{gradeable_id}/scores")
 async def get_gradeable_submissions(
     gradeable_id: int,
     db: Session = Depends(get_db),
-    # token: str = Depends(prof_or_ta_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """
     Get all submissions for a specific gradeable
@@ -2038,7 +2085,7 @@ async def get_gradeable_submissions(
         })
     return JSONResponse(status_code=200, content=results)
 
-@app.get("/gradeables/{gradeable_id}/upload-scores")
+@app.post("/gradeables/{gradeable_id}/upload-scores")
 async def upload_gradeable_scores(
     gradeable_id: int,
     file: UploadFile = File(...),
@@ -2056,29 +2103,40 @@ async def upload_gradeable_scores(
         )
     
     try:
-        # Read file content
+        # Validate gradeable exists and get max points
+        gradeable = db.query(Gradeable).filter(Gradeable.id == gradeable_id).first()
+        if not gradeable:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Gradeable not found"
+            )
+        
+        # Read and parse file content
         content = await file.read()
         content_str = content.decode('utf-8')
         
-        # Parse CSV content
-        scores = parse_scores_from_csv(content_str)
+        # Parse scores with detailed validation
+        scores = parse_scores_from_csv(
+            csv_content=content_str, 
+            gradeable_id=gradeable_id, 
+            max_points=gradeable.max_points,
+            db=db
+        )
         
-        # Update scores in the database
-        for score in scores:
-            submission = db.query(GradeableScores).filter(
+        # Bulk upsert scores
+        for score_data in scores:
+            existing_submission = db.query(GradeableScores).filter(
                 GradeableScores.gradeable_id == gradeable_id,
-                GradeableScores.user_id == score["user_id"]
+                GradeableScores.user_id == score_data["user_id"]
             ).first()
             
-            if submission:
-                submission.score = score["score"]
-                submission.submitted_at = datetime.now(timezone.utc).isoformat()
+            if existing_submission:
+                existing_submission.score = score_data["score"]
             else:
                 new_submission = GradeableScores(
-                    user_id=score["user_id"],
+                    user_id=score_data["user_id"],
                     gradeable_id=gradeable_id,
-                    score=score["score"],
-                    submitted_at=datetime.now(timezone.utc).isoformat()
+                    score=score_data["score"]
                 )
                 db.add(new_submission)
         
@@ -2089,63 +2147,59 @@ async def upload_gradeable_scores(
             "gradeable_id": gradeable_id,
             "total_submissions": len(scores)
         })
+    
+    except ValueError as ve:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error uploading scores: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error uploading scores: {str(e)}")
+        
+        
 
 @app.post("/gradeables/create")
 async def create_gradeable(
     gradeable: GradeableCreateRequest,
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
+    user_data: User = Depends(prof_or_ta_required),
+    db: Session = Depends(get_db)
 ):
-    """
-    Create a new gradeable
-    """
+    """Create a new gradeable"""
+    print("HI")
+    username = user_data.get('sub')
+    user = db.query(User).filter(User.username == username).first()
+    print("2137")
     try:
-        # Extract the token payload to get the creator ID (username)
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        user = db.query(User).filter(User.username == username).first()
-        
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Check if a gradeable with the same title already exists
-        existing_gradeable = db.query(Gradeable).filter(Gradeable.title == gradeable.title).first()
-        if existing_gradeable:
-            raise HTTPException(status_code=400, detail="Gradeable with this title already exists")
-        
-        # Create new gradeable
+        print("Title is", gradeable.title, "Max points is", gradeable.max_points, "Creator ID is", user.id)
         new_gradeable = Gradeable(
             title=gradeable.title,
-            description=gradeable.description,
-            due_date=gradeable.due_date,
             max_points=gradeable.max_points,
-            creator_id=user.id,
-            created_at=datetime.now(timezone.utc).isoformat()
+            creator_id=user.id
         )
         
+        print("Hello")
         db.add(new_gradeable)
         db.commit()
         db.refresh(new_gradeable)
+        print("HELLO")
+
         
         return JSONResponse(status_code=201, content={
-            "id": new_gradeable.id,
+            #"id": new_gradeable.id,
             "title": new_gradeable.title,
-            "description": new_gradeable.description,
-            "due_date": new_gradeable.due_date,
             "max_points": new_gradeable.max_points,
             "creator_id": new_gradeable.creator_id,
-            "created_at": new_gradeable.created_at
         })
-    except HTTPException as he:
-        raise he
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error creating gradeable: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error creating gradeable: {str(e)}"
+        )
 
-def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
+def parse_scores_from_csv(csv_content: str, 
+    gradeable_id: int, 
+    max_points: int,
+    db: Session) -> List[Dict[str, Any]]:
     """
     Parse CSV content containing user scores.
     Expected CSV format: user_id,score
@@ -2160,7 +2214,7 @@ def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
     # from io import StringIO
     
     scores = []
-    processed_user_ids = set()
+    processed_usernames = set()
     
     # Parse the CSV content
     try:
@@ -2168,23 +2222,31 @@ def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
         csv_reader = csv.DictReader(csv_file)
         
         # Check required headers
-        required_headers = ['user_id', 'score']
+        required_headers = ['id','username', 'score']
         headers = csv_reader.fieldnames
-        
-        if not all(header in headers for header in required_headers):
-            raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
-        
+        print("headers are", headers)
+        # if not all(header in headers for header in required_headers):
+        #     print(f"Warning: Extra headers found: {headers}. Proceeding with parsing.")
+        #     raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
+        print("line")
         # Process each row
-        for row in csv_reader:
+        for row_num, row in enumerate(csv_reader, start=2):
+            print("hihfi")
+            print("Row is", row)
             try:
-                user_id = int(row['user_id'])
+                username = row['username'].strip()
                 score = int(row['score'])
                 
+                user = db.query(User).filter(User.username == username).first()
+                if not user:
+                    raise ValueError(f"User with username '{username}' not found on row {row_num}")
+
+                print("User ID is", user_id, "Score is", score)
                 scores.append({
                     'user_id': user_id,
                     'score': score
                 })
-                processed_user_ids.add(user_id)
+                processed_usernames.add(username)
             except (ValueError, KeyError) as e:
                 # Skip invalid rows but continue processing
                 print(f"Error processing row: {row}. Error: {str(e)}")
@@ -2194,20 +2256,17 @@ def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
         raise ValueError(f"Error parsing CSV: {str(e)}")
     
     # Get all students from the database and add default score of 0 for missing ones
-    with SessionLocal() as db:
         # Get student role ID
-        student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
-        if student_role:
-            # Get all student users
-            students = db.query(User).filter(User.role_id == student_role.id).all()
-            
-            # Add default score of 0 for students not in the CSV
-            for student in students:
-                if student.id not in processed_user_ids:
-                    scores.append({
-                        'user_id': student.id,
-                        'score': 0
-                    })
+    student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
+    if student_role:
+        students = db.query(User).filter(User.role_id == student_role.id).all()
+        
+        for student in students:
+            if student.id not in processed_user_ids:
+                scores.append({
+                    'user_id': student.id,
+                    'score': 0
+                })
     
     return scores
 
@@ -2429,41 +2488,31 @@ async def download_reference_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
-class SubmittableCreateRequest(BaseModel):
-    title: str
-    opens_at: Optional[str] = None  # ISO 8601 format
-    deadline: str  # ISO 8601 format
-    description: str
-
-    @validator('deadline')
-    def validate_deadline(cls, v):
-        try:
-            datetime.fromisoformat(v)
-            return v
-        except ValueError:
-            raise ValueError("Invalid ISO 8601 format for deadline")
-
-    @validator('opens_at')
-    def validate_opens_at(cls, v):
-        if v is None:
-            return v
-        try:
-            datetime.fromisoformat(v)
-            return v
-        except ValueError:
-            raise ValueError("Invalid ISO 8601 format for opens_at")
 
 @app.post("/submittables/create")
 async def create_submittable(
-    submittable: SubmittableCreateRequest,
-    file: UploadFile = File(...),  # Now accepts a single file
+    title: str = FastAPIForm(...),
+    deadline: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    opens_at: Optional[str] = FastAPIForm(None),
+    file: UploadFile = File(...),
     db: Session = Depends(get_db),
     token: str = Depends(prof_required)
 ):
     """Create a new submittable with a reference file"""
     try:
+        # Basic validation
+        try:
+            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            if opens_at:
+                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
+        
         # Get the creator (professor) from token
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        # Fix: Don't decode the token as it's already decoded by the dependency
+        # payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = token  # The token is already decoded by prof_required dependency
         username = payload.get("sub")
         user = db.query(User).filter(User.username == username).first()
         
@@ -2480,12 +2529,12 @@ async def create_submittable(
 
         # Create submittable in database with file information
         new_submittable = Submittable(
-            title=submittable.title,
-            opens_at=submittable.opens_at,
-            deadline=submittable.deadline,
-            description=submittable.description,
+            title=title,
+            opens_at=opens_at,
+            deadline=deadline,
+            description=description,
             creator_id=user.id,
-            file_url=f"/uploads/{file_name}",  # URL path
+            file_url=f"uploads/{file_name}",  # URL path without leading slash
             original_filename=file.filename
         )
         
@@ -2497,8 +2546,14 @@ async def create_submittable(
             "message": "Submittable created successfully",
             "submittable_id": new_submittable.id
         })
+    except HTTPException as he:
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)  # Clean up file if validation fails
+        raise he
     except Exception as e:
         db.rollback()
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error creating submittable: {str(e)}")
 
 @app.get("/submittables/{submittable_id}")
@@ -2606,24 +2661,37 @@ async def delete_submittable(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting submittable: {str(e)}")
 
+
 @app.put("/submittables/{submittable_id}")
 async def update_submittable(
     submittable_id: int,
-    submittable: SubmittableCreateRequest,
+    title: str = FastAPIForm(...),
+    deadline: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    opens_at: Optional[str] = FastAPIForm(None),
     file: Optional[UploadFile] = None,
     db: Session = Depends(get_db),
     token: str = Depends(prof_required)
 ):
     """Update a submittable (professors only)"""
     try:
+        # Basic validation
+        try:
+            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            if opens_at:
+                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
+            
         existing_submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
         if not existing_submittable:
             raise HTTPException(status_code=404, detail="Submittable not found")
         
         # Update basic information
-        existing_submittable.opens_at = submittable.opens_at
-        existing_submittable.deadline = submittable.deadline
-        existing_submittable.description = submittable.description
+        existing_submittable.title = title
+        existing_submittable.opens_at = opens_at
+        existing_submittable.deadline = deadline
+        existing_submittable.description = description
         
         # Handle file update if provided
         if file:
@@ -2641,7 +2709,7 @@ async def update_submittable(
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
             
-            existing_submittable.file_url = f"/uploads/{file_name}"
+            existing_submittable.file_url = f"uploads/{file_name}"
             existing_submittable.original_filename = file.filename
         
         db.commit()
@@ -2655,6 +2723,8 @@ async def update_submittable(
         raise he
     except Exception as e:
         db.rollback()
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error updating submittable: {str(e)}")
 
 @app.delete("/submissions/{submission_id}")
@@ -2978,100 +3048,78 @@ async def send_message(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.websocket("/discussions/ws/{channel_id}")
+@app.websocket("/discussions/ws/{channel_id}/{token}")
 async def websocket_endpoint(
     websocket: WebSocket, 
     channel_id: int, 
-    current_user_data: dict = Depends(get_current_user),
+    #user_id: int,
+    token: str,
+    # current_user_data: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # print("In here")
+    current_user_data = get_current_user_from_string(token , db)
+    if not current_user_data:
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
     user = current_user_data["user"]
     
     # Validate user's access to the channel
+    print(f"User: {user.username}, Channel ID: {channel_id}")
     if not validate_channel_access(user, channel_id, db):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this channel"
         )
 
-    await manager.connect(websocket, channel_id, user["id"])
+    #await manager.connect(websocket, channel_id, int(token))
+    
+
+    await manager.connect(websocket, channel_id, user.id)
     try:
         while True:
             data = await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket, channel_id)
 
-
-@app.post("/teams/upload-csv/")
-async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a CSV file.")
-
+@app.get("/discussions/download/{file_name}")
+async def download_file(
+    file_name: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Download a file and return it as base64 encoded data"""
     try:
-        # Save the uploaded file to a temporary location
-        temp_file_path = f"temp_{file.filename}"
-        with open(temp_file_path, "wb") as temp_file:
-            temp_file.write(file.file.read())
-
-        # Read the CSV file using pandas
-        df = pd.read_csv(temp_file_path)
-
-        # Validate the CSV format
-        required_columns = ['team name', 'member1', 'member2', 'member3', 'member4', 'member5', 'member6', 'member7', 'member8', 'member9', 'member10']
-        if not all(column in df.columns for column in required_columns):
-            raise HTTPException(status_code=400, detail="Invalid CSV format. Required columns: team name, member1, member2, ..., member10")
-
-        # Check if all members exist in the Users database and perform other checks
-        team_names = set()
-        members_set = set()
-        for _, row in df.iterrows():
-            team_name = row['team name']
-            members = [row[f'member{i}'] for i in range(1, 11) if pd.notna(row[f'member{i}'])]
-
-            if team_name in team_names:
-                raise HTTPException(status_code=400, detail=f"Invalid file: Duplicate team name '{team_name}' found.")
-            
-            team_names.add(team_name)
-
-            for member_name in members:
-                user = db.query(User).filter_by(name=member_name).first()
-                if not user:
-                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' does not exist in the database.")
-                if user.team_id:
-                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is already assigned to a team.")
-                if member_name in members_set:
-                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is assigned to multiple teams.")
-                members_set.add(member_name)
-
-        # Get the highest team ID present in the database
-        max_team_id = db.query(func.max(Team.id)).scalar() or 0
-
-        # Process each row in the CSV file
-        for _, row in df.iterrows():
-            max_team_id += 1
-            team_name = row['team name']
-            members = [row[f'member{i}'] for i in range(1, 11) if pd.notna(row[f'member{i}'])]
-
-            # Create a new team
-            team = Team(id=max_team_id, name=team_name)
-            db.add(team)
-
-            # Add members to the team
-            for member_name in members:
-                user = db.query(User).filter_by(name=member_name).first()
-                if user:
-                    team.members.append(user)
-                    user.team_id = max_team_id
-
-        db.commit()
-
-        # Clean up the temporary file
-        os.remove(temp_file_path)
-
-        return {"detail": "File uploaded and data saved successfully!"}
+        # Get the file record from the database
+        file_record = db.query(Message).filter(Message.file_name == file_name).first()
+        if not file_record:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Check if the user has access to the file
+        user = current_user["user"]
+        if not validate_channel_access(user, file_record.channel_id, db):
+            raise HTTPException(status_code=403, detail="Not authorized to download this file")
+        # Check if the file is a reference file
+        if file_record.message_type != 'file':
+            raise HTTPException(status_code=400, detail="Not a reference file")
+        
+        # Convert URL path to local path
+        local_path = file_record.file_name.lstrip('/')
+        local_path = os.path.join("forums_uploads", local_path)
+        # Check if the file exists locally
+        if not os.path.exists(local_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Read the file and encode it in base64
+        with open(local_path, "rb") as file:
+            file_data = file.read()
+            encoded_file_data = base64.b64encode(file_data).decode('utf-8')
+        
+        return JSONResponse(status_code=200, content={
+            "file_id": file_record.id,
+            "original_filename": file_record.file_name,
+            "file_data": encoded_file_data
+        })
+    except HTTPException as he:
+        raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
