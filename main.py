@@ -203,7 +203,7 @@ class Announcement(Base):
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     title = Column(String, nullable=False)
-    content = Column(JSONB, nullable=False)
+    content = Column(String, nullable=False)  # Changed from JSONB to String
     url_name = Column(String, unique=True, nullable=True)
     
     @validates("creator_id")
@@ -1158,7 +1158,7 @@ class Show(BaseModel):
     creator_id: int
     created_at: str
     title: str
-    content: dict
+    content: str
     url_name: Optional[str] = None
 
     class Config:
@@ -1168,33 +1168,25 @@ class Show(BaseModel):
 async def create(
     title: Annotated[str, Form()],
     description: Annotated[str, Form()],
-    file: Union[UploadFile, None] = None,
+    file: UploadFile | None = None,  # Changed this line
     db: Session = Depends(get_db),
 ):
     try:
-        # Handle file upload if provided
         file_location = None
-        if file and file.filename:
+        if file and file.filename:  # Only process if file exists and has filename
             file_extension = file.filename.split('.')[-1]
             file_name = f"{uuid.uuid4()}.{file_extension}"
             file_location = f"uploads/{file_name}"
             with open(file_location, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
 
-        # Parse description JSON
-        try:
-            description_json = json.loads(description)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
-        
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
-        # Create new announcement
         new_announcement = Announcement(
             creator_id=1,
             created_at=current_time,
             title=title,
-            content=description_json,
+            content=description,
             url_name=file_location
         )
         
@@ -1204,30 +1196,17 @@ async def create(
         
         return new_announcement
         
-    except HTTPException as e:
-        raise e
     except Exception as e:
         if file_location and os.path.exists(file_location):
-            os.remove(file_location)  # Clean up file if something went wrong
+            os.remove(file_location)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-
-@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
-def destroy(id:int, db:Session=Depends(get_db)):
-    blog=db.query(Announcement).filter(Announcement.id==id)
-    if not blog.first():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
-    if blog.first().url_name and os.path.exists(blog.first().url_name):  # Changed from file_path to url_name
-        os.remove(blog.first().url_name)
-    blog.delete(synchronize_session=False)
-    db.commit()
-    return 'done'
+    
 
 @app.put('/announcements/{id}', status_code=status.HTTP_202_ACCEPTED)
 def update(
     id: int,
     title: Annotated[str, Form()],
-    description: Annotated[str, Form()],
+    description: Annotated[str, Form()],  # Now expects plain text
     file: UploadFile | None = None,
     db: Session = Depends(get_db)
 ):
@@ -1246,19 +1225,26 @@ def update(
         with open(new_url_name, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     
-    try:
-        description_json = json.loads(description)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
-    
     # Update only the modifiable fields
     announcement.first().title = title
-    announcement.first().content = description_json
+    announcement.first().content = description  # Store description directly as string
     announcement.first().url_name = new_url_name
 
     db.commit()
     db.refresh(announcement.first())
     return {"detail": "Announcement updated", "announcement": announcement.first()}
+
+@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
+def destroy(id:int, db:Session=Depends(get_db)):
+    blog=db.query(Announcement).filter(Announcement.id==id)
+    if not blog.first():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
+    if blog.first().url_name and os.path.exists(blog.first().url_name):  # Changed from file_path to url_name
+        os.remove(blog.first().url_name)
+    blog.delete(synchronize_session=False)
+    db.commit()
+    return 'done'
+
 
 @app.get('/announcements', response_model=List[Show])
 def all(db:Session = Depends(get_db)):
