@@ -1193,41 +1193,82 @@ class Show(BaseModel):
 
 @app.post('/announcements', status_code=status.HTTP_201_CREATED)
 async def create(
-    title: Annotated[str, Form()],
-    description: Annotated[str, Form()],
-    file: UploadFile | None = None,  # Changed this line
-    db: Session = Depends(get_db),
+    title: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
 ):
     try:
-        file_location = None
-        if file and file.filename:  # Only process if file exists and has filename
-            file_extension = file.filename.split('.')[-1]
-            file_name = f"{uuid.uuid4()}.{file_extension}"
-            file_location = f"uploads/{file_name}"
-            with open(file_location, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Create file path
+        file_extension = os.path.splitext(file.filename)[1]
+        file_name = f"{uuid.uuid4()}{file_extension}"
+        file_path = os.path.join("uploads", file_name)
         
-        new_announcement = Announcement(
-            creator_id=1,
-            created_at=current_time,
+        # Ensure uploads directory exists
+        os.makedirs("uploads", exist_ok=True)
+        
+        # Save the file
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        # Create announcement in database
+        db_announcement = Announcement(
             title=title,
             content=description,
-            url_name=file_location
+            url_name=file_name,
+            creator_id=1  # Default creator ID
         )
-        
-        db.add(new_announcement)
+        db.add(db_announcement)
         db.commit()
-        db.refresh(new_announcement)
+        db.refresh(db_announcement)
         
-        return new_announcement
-        
+        return db_announcement
     except Exception as e:
-        if file_location and os.path.exists(file_location):
-            os.remove(file_location)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get('/announcements/{announcement_id}/download')
+async def download_announcement_file(
+    announcement_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == announcement_id).first()
+        if not announcement or not announcement.url_name:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        file_path = os.path.join("uploads", announcement.url_name)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return FileResponse(
+            file_path,
+            filename=announcement.url_name,
+            media_type='application/octet-stream'
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get('/announcements', response_model=List[Show])
+def all(db: Session = Depends(get_db)):
+    announcements = db.query(Announcement).order_by(Announcement.created_at.desc()).all()
+    return announcements
+
+@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
+def destroy(id: int, db: Session = Depends(get_db)):
+    announcement = db.query(Announcement).filter(Announcement.id == id).first()
+    if not announcement:
+        raise HTTPException(status_code=404, detail="Announcement not found")
     
+    # Delete the associated file
+    if announcement.url_name:
+        file_path = os.path.join("uploads", announcement.url_name)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    
+    db.delete(announcement)
+    db.commit()
+    return None
 
 @app.put('/announcements/{id}', status_code=status.HTTP_202_ACCEPTED)
 def update(
