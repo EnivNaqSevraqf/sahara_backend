@@ -1,5 +1,6 @@
 import json
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, WebSocket, WebSocketDisconnect, WebSocketException
+# Explicitly import FastAPI's Form and rename it to avoid conflicts
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, Form as FastAPIForm, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text
@@ -112,9 +113,10 @@ class Submittable(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role.role != RoleType.PROF:
-            raise ValueError("Only professors can create submittables.")
+        with SessionLocal() as db:
+            user = db.query(User).filter_by(id=value).first()
+            if user and user.role.role != RoleType.PROF:
+                raise ValueError("Only professors can create submittables.")
         return value
 
 class Submission(Base):
@@ -2453,41 +2455,31 @@ async def download_reference_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
-class SubmittableCreateRequest(BaseModel):
-    title: str
-    opens_at: Optional[str] = None  # ISO 8601 format
-    deadline: str  # ISO 8601 format
-    description: str
-
-    @validator('deadline')
-    def validate_deadline(cls, v):
-        try:
-            datetime.fromisoformat(v)
-            return v
-        except ValueError:
-            raise ValueError("Invalid ISO 8601 format for deadline")
-
-    @validator('opens_at')
-    def validate_opens_at(cls, v):
-        if v is None:
-            return v
-        try:
-            datetime.fromisoformat(v)
-            return v
-        except ValueError:
-            raise ValueError("Invalid ISO 8601 format for opens_at")
 
 @app.post("/submittables/create")
 async def create_submittable(
-    submittable: SubmittableCreateRequest,
-    file: UploadFile = File(...),  # Now accepts a single file
+    title: str = FastAPIForm(...),
+    deadline: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    opens_at: Optional[str] = FastAPIForm(None),
+    file: UploadFile = File(...),
     db: Session = Depends(get_db),
     token: str = Depends(prof_required)
 ):
     """Create a new submittable with a reference file"""
     try:
+        # Basic validation
+        try:
+            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            if opens_at:
+                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
+        
         # Get the creator (professor) from token
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        # Fix: Don't decode the token as it's already decoded by the dependency
+        # payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = token  # The token is already decoded by prof_required dependency
         username = payload.get("sub")
         user = db.query(User).filter(User.username == username).first()
         
@@ -2504,10 +2496,10 @@ async def create_submittable(
 
         # Create submittable in database with file information
         new_submittable = Submittable(
-            title=submittable.title,
-            opens_at=submittable.opens_at,
-            deadline=submittable.deadline,
-            description=submittable.description,
+            title=title,
+            opens_at=opens_at,
+            deadline=deadline,
+            description=description,
             creator_id=user.id,
             file_url=f"/uploads/{file_name}",  # URL path
             original_filename=file.filename
@@ -2521,8 +2513,14 @@ async def create_submittable(
             "message": "Submittable created successfully",
             "submittable_id": new_submittable.id
         })
+    except HTTPException as he:
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)  # Clean up file if validation fails
+        raise he
     except Exception as e:
         db.rollback()
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error creating submittable: {str(e)}")
 
 @app.get("/submittables/{submittable_id}")
@@ -2630,24 +2628,37 @@ async def delete_submittable(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting submittable: {str(e)}")
 
+
 @app.put("/submittables/{submittable_id}")
 async def update_submittable(
     submittable_id: int,
-    submittable: SubmittableCreateRequest,
+    title: str = FastAPIForm(...),
+    deadline: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    opens_at: Optional[str] = FastAPIForm(None),
     file: Optional[UploadFile] = None,
     db: Session = Depends(get_db),
     token: str = Depends(prof_required)
 ):
     """Update a submittable (professors only)"""
     try:
+        # Basic validation
+        try:
+            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            if opens_at:
+                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
+            
         existing_submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
         if not existing_submittable:
             raise HTTPException(status_code=404, detail="Submittable not found")
         
         # Update basic information
-        existing_submittable.opens_at = submittable.opens_at
-        existing_submittable.deadline = submittable.deadline
-        existing_submittable.description = submittable.description
+        existing_submittable.title = title
+        existing_submittable.opens_at = opens_at
+        existing_submittable.deadline = deadline
+        existing_submittable.description = description
         
         # Handle file update if provided
         if file:
@@ -2679,6 +2690,8 @@ async def update_submittable(
         raise he
     except Exception as e:
         db.rollback()
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error updating submittable: {str(e)}")
 
 @app.delete("/submissions/{submission_id}")
