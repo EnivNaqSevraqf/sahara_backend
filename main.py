@@ -3002,3 +3002,76 @@ async def websocket_endpoint(
         manager.disconnect(websocket, channel_id)
 
 
+@app.post("/teams/upload-csv/")
+async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a CSV file.")
+
+    try:
+        # Save the uploaded file to a temporary location
+        temp_file_path = f"temp_{file.filename}"
+        with open(temp_file_path, "wb") as temp_file:
+            temp_file.write(file.file.read())
+
+        # Read the CSV file using pandas
+        df = pd.read_csv(temp_file_path)
+
+        # Validate the CSV format
+        required_columns = ['team name', 'member1', 'member2', 'member3', 'member4', 'member5', 'member6', 'member7', 'member8', 'member9', 'member10']
+        if not all(column in df.columns for column in required_columns):
+            raise HTTPException(status_code=400, detail="Invalid CSV format. Required columns: team name, member1, member2, ..., member10")
+
+        # Check if all members exist in the Users database and perform other checks
+        team_names = set()
+        members_set = set()
+        for _, row in df.iterrows():
+            team_name = row['team name']
+            members = [row[f'member{i}'] for i in range(1, 11) if pd.notna(row[f'member{i}'])]
+
+            if team_name in team_names:
+                raise HTTPException(status_code=400, detail=f"Invalid file: Duplicate team name '{team_name}' found.")
+            
+            team_names.add(team_name)
+
+            for member_name in members:
+                user = db.query(User).filter_by(name=member_name).first()
+                if not user:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' does not exist in the database.")
+                if user.team_id:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is already assigned to a team.")
+                if member_name in members_set:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is assigned to multiple teams.")
+                members_set.add(member_name)
+
+        # Get the highest team ID present in the database
+        max_team_id = db.query(func.max(Team.id)).scalar() or 0
+
+        # Process each row in the CSV file
+        for _, row in df.iterrows():
+            max_team_id += 1
+            team_name = row['team name']
+            members = [row[f'member{i}'] for i in range(1, 11) if pd.notna(row[f'member{i}'])]
+
+            # Create a new team
+            team = Team(id=max_team_id, name=team_name)
+            db.add(team)
+
+            # Add members to the team
+            for member_name in members:
+                user = db.query(User).filter_by(name=member_name).first()
+                if user:
+                    team.members.append(user)
+                    user.team_id = max_team_id
+
+        db.commit()
+
+        # Clean up the temporary file
+        os.remove(temp_file_path)
+
+        return {"detail": "File uploaded and data saved successfully!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
