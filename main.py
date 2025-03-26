@@ -1192,28 +1192,33 @@ class Show(BaseModel):
 async def create(
     title: str = FastAPIForm(...),
     description: str = FastAPIForm(...),
-    file: UploadFile = File(...),
+    file: UploadFile = File(None),
     db: Session = Depends(get_db)
 ):
     try:
-        # Create file path
-        file_extension = os.path.splitext(file.filename)[1]
-        file_name = f"{uuid.uuid4()}{file_extension}"
-        file_path = os.path.join("uploads", file_name)
-        
-        # Ensure uploads directory exists
-        os.makedirs("uploads", exist_ok=True)
-        
-        # Save the file
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
+        # Create file path and url_name
+        url_name = None
+        if file:
+            # Create file path
+            file_extension = os.path.splitext(file.filename)[1]
+            file_name = f"{uuid.uuid4()}{file_extension}"
+            file_path = os.path.join("uploads", file_name)
+            
+            # Ensure uploads directory exists
+            os.makedirs("uploads", exist_ok=True)
+            
+            # Save the file
+            with open(file_path, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
+            
+            url_name = file_name
         
         # Create announcement in database
         db_announcement = Announcement(
             title=title,
             content=description,
-            url_name=file_name,
+            url_name=url_name,
             creator_id=1  # Default creator ID
         )
         db.add(db_announcement)
@@ -1224,13 +1229,13 @@ async def create(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get('/announcements/{announcement_id}/download')
+@app.get('/announcements/{id}/download')
 async def download_announcement_file(
-    announcement_id: int,
+    id: int,
     db: Session = Depends(get_db)
 ):
     try:
-        announcement = db.query(Announcement).filter(Announcement.id == announcement_id).first()
+        announcement = db.query(Announcement).filter(Announcement.id == id).first()
         if not announcement or not announcement.url_name:
             raise HTTPException(status_code=404, detail="File not found")
         
@@ -1248,16 +1253,29 @@ async def download_announcement_file(
 
 @app.get('/announcements', response_model=List[Show])
 def all(db: Session = Depends(get_db)):
-    announcements = db.query(Announcement).order_by(Announcement.created_at.desc()).all()
-    return announcements
-
-@app.delete('/announcements/{announcement_id}')
-def destroy(announcement_id: int, db: Session = Depends(get_db)):
-    announcement = db.query(Announcement).filter(Announcement.id == announcement_id).first()
-    if not announcement:
-        raise HTTPException(status_code=404, detail="Announcement not found")
-    
     try:
+        announcements = db.query(Announcement).order_by(Announcement.created_at.desc()).all()
+        return announcements
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get('/announcements/{id}', status_code=200, response_model=Show)
+def show(id: int, db: Session = Depends(get_db)):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == id).first()
+        if not announcement:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id {id} not found')
+        return announcement
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
+def destroy(id: int, db: Session = Depends(get_db)):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == id).first()
+        if not announcement:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
+        
         # Delete the associated file if it exists
         if announcement.url_name:
             file_path = os.path.join("uploads", announcement.url_name)
@@ -1267,7 +1285,8 @@ def destroy(announcement_id: int, db: Session = Depends(get_db)):
         # Delete the announcement from database
         db.delete(announcement)
         db.commit()
-        return {"message": "Announcement deleted successfully"}
+        
+        return {'message': 'Announcement deleted successfully'}
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting announcement: {str(e)}")
@@ -1280,53 +1299,81 @@ def update(
     file: UploadFile | None = None,
     db: Session = Depends(get_db)
 ):
-    announcement = db.query(Announcement).filter(Announcement.id==id)
-    if not announcement.first():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
-    
-    new_url_name = announcement.first().url_name
-    if file:
-        if announcement.first().url_name and os.path.exists(announcement.first().url_name):
-            os.remove(announcement.first().url_name)
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id==id).first()
+        if not announcement:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
         
-        file_extension = file.filename.split('.')[-1]
-        file_name = f"{uuid.uuid4()}.{file_extension}"
-        new_url_name = f"uploads/{file_name}"
-        with open(new_url_name, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-    
-    # Update only the modifiable fields
-    announcement.first().title = title
-    announcement.first().content = description  # Store description directly as string
-    announcement.first().url_name = new_url_name
-
-    db.commit()
-    db.refresh(announcement.first())
-    return {"detail": "Announcement updated", "announcement": announcement.first()}
+        # Keep existing url_name if no new file
+        new_url_name = announcement.url_name
+        
+        # Handle file upload if provided
+        if file:
+            # Delete old file if exists
+            if announcement.url_name:
+                old_file_path = os.path.join("uploads", announcement.url_name)
+                if os.path.exists(old_file_path):
+                    os.remove(old_file_path)
+            
+            # Create new file
+            file_extension = os.path.splitext(file.filename)[1]
+            file_name = f"{uuid.uuid4()}{file_extension}"
+            file_path = os.path.join("uploads", file_name)
+            
+            # Ensure uploads directory exists
+            os.makedirs("uploads", exist_ok=True)
+            
+            # Save the file
+            with open(file_path, "wb") as buffer:
+                content = file.file.read()
+                buffer.write(content)
+            
+            new_url_name = file_name
+        
+        # Update announcement fields
+        announcement.title = title
+        announcement.content = description
+        announcement.url_name = new_url_name
+        
+        db.commit()
+        return {"detail": "Announcement updated", "announcement": announcement}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
-def destroy(id:int, db:Session=Depends(get_db)):
-    blog=db.query(Announcement).filter(Announcement.id==id)
-    if not blog.first():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
-    if blog.first().url_name and os.path.exists(blog.first().url_name):  # Changed from file_path to url_name
-        os.remove(blog.first().url_name)
-    blog.delete(synchronize_session=False)
-    db.commit()
-    return 'done'
+def destroy(id: int, db: Session = Depends(get_db)):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == id).first()
+        if not announcement:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
+        
+        # Delete the associated file if it exists
+        if announcement.url_name:
+            file_path = os.path.join("uploads", announcement.url_name)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        
+        # Delete the announcement from database
+        db.delete(announcement)
+        db.commit()
+        
+        return {'message': 'Announcement deleted successfully'}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting announcement: {str(e)}")
 
 
-@app.get('/announcements', response_model=List[Show])
-def all(db:Session = Depends(get_db)):
+@app.get("/announcements", response_model=List[Show])
+def all(db: Session = Depends(get_db)):
     blogs = db.query(Announcement).all()
     return blogs
 
-@app.get('/announcements/{id}', status_code=200, response_model=Show)
-def show(id, response: Response, db:Session=Depends(get_db)):
-    blog = db.query(Announcement).filter(Announcement.id==id).first()
+@app.get("/announcements/{id}", status_code=200, response_model=Show)
+def show(id: int, db: Session = Depends(get_db)):
+    blog = db.query(Announcement).filter(Announcement.id == id).first()
     if not blog:
-        response.status_code=status.HTTP_404_NOT_FOUND
-        return {'details': f'blog with {id} not found'}
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'blog with {id} not found')
     return blog
 
 @app.post("/quiz/create")
@@ -2085,75 +2132,75 @@ async def get_gradeable_submissions(
         })
     return JSONResponse(status_code=200, content=results)
 
-@app.post("/gradeables/{gradeable_id}/upload-scores")
-async def upload_gradeable_scores(
-    gradeable_id: int,
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
-):
-    """
-    Upload scores for a specific gradeable
-    """
-    # Ensure the file is a CSV
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only CSV files are allowed"
-        )
+# @app.post("/gradeables/{gradeable_id}/upload-scores")
+# async def upload_gradeable_scores(
+#     gradeable_id: int,
+#     file: UploadFile = File(...),
+#     db: Session = Depends(get_db),
+#     token: str = Depends(prof_or_ta_required)
+# ):
+#     """
+#     Upload scores for a specific gradeable
+#     """
+#     # Ensure the file is a CSV
+#     if not file.filename.endswith('.csv'):
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Only CSV files are allowed"
+#         )
     
-    try:
-        # Validate gradeable exists and get max points
-        gradeable = db.query(Gradeable).filter(Gradeable.id == gradeable_id).first()
-        if not gradeable:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Gradeable not found"
-            )
+#     try:
+#         # Validate gradeable exists and get max points
+#         gradeable = db.query(Gradeable).filter(Gradeable.id == gradeable_id).first()
+#         if not gradeable:
+#             raise HTTPException(
+#                 status_code=status.HTTP_404_NOT_FOUND,
+#                 detail="Gradeable not found"
+#             )
         
-        # Read and parse file content
-        content = await file.read()
-        content_str = content.decode('utf-8')
+#         # Read and parse file content
+#         content = await file.read()
+#         content_str = content.decode('utf-8')
         
-        # Parse scores with detailed validation
-        scores = parse_scores_from_csv(
-            csv_content=content_str, 
-            gradeable_id=gradeable_id, 
-            max_points=gradeable.max_points,
-            db=db
-        )
+#         # Parse scores with detailed validation
+#         scores = parse_scores_from_csv(
+#             csv_content=content_str, 
+#             gradeable_id=gradeable_id, 
+#             max_points=gradeable.max_points,
+#             db=db
+#         )
         
-        # Bulk upsert scores
-        for score_data in scores:
-            existing_submission = db.query(GradeableScores).filter(
-                GradeableScores.gradeable_id == gradeable_id,
-                GradeableScores.user_id == score_data["user_id"]
-            ).first()
+#         # Bulk upsert scores
+#         for score_data in scores:
+#             existing_submission = db.query(GradeableScores).filter(
+#                 GradeableScores.gradeable_id == gradeable_id,
+#                 GradeableScores.user_id == score_data["user_id"]
+#             ).first()
             
-            if existing_submission:
-                existing_submission.score = score_data["score"]
-            else:
-                new_submission = GradeableScores(
-                    user_id=score_data["user_id"],
-                    gradeable_id=gradeable_id,
-                    score=score_data["score"]
-                )
-                db.add(new_submission)
+#             if existing_submission:
+#                 existing_submission.score = score_data["score"]
+#             else:
+#                 new_submission = GradeableScores(
+#                     user_id=score_data["user_id"],
+#                     gradeable_id=gradeable_id,
+#                     score=score_data["score"]
+#                 )
+#                 db.add(new_submission)
         
-        db.commit()
+#         db.commit()
         
-        return JSONResponse(status_code=200, content={
-            "message": "Scores uploaded successfully",
-            "gradeable_id": gradeable_id,
-            "total_submissions": len(scores)
-        })
+#         return JSONResponse(status_code=200, content={
+#             "message": "Scores uploaded successfully",
+#             "gradeable_id": gradeable_id,
+#             "total_submissions": len(scores)
+#         })
     
-    except ValueError as ve:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=str(ve))
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Unexpected error uploading scores: {str(e)}")
+#     except ValueError as ve:
+#         db.rollback()
+#         raise HTTPException(status_code=400, detail=str(ve))
+#     except Exception as e:
+#         db.rollback()
+#         raise HTTPException(status_code=500, detail=f"Unexpected error uploading scores: {str(e)}")
         
         
 
@@ -2196,79 +2243,79 @@ async def create_gradeable(
             detail=f"Error creating gradeable: {str(e)}"
         )
 
-def parse_scores_from_csv(csv_content: str, 
-    gradeable_id: int, 
-    max_points: int,
-    db: Session) -> List[Dict[str, Any]]:
-    """
-    Parse CSV content containing user scores.
-    Expected CSV format: user_id,score
-    First row should be headers.
+# def parse_scores_from_csv(csv_content: str, 
+#     gradeable_id: int, 
+#     max_points: int,
+#     db: Session) -> List[Dict[str, Any]]:
+#     """
+#     Parse CSV content containing user scores.
+#     Expected CSV format: user_id,score
+#     First row should be headers.
     
-    Also assigns a default score of 0 to any student who doesn't have a score in the CSV.
+#     Also assigns a default score of 0 to any student who doesn't have a score in the CSV.
     
-    Returns:
-        List of dictionaries with user_id and score
-    """
-    # import csv
-    # from io import StringIO
+#     Returns:
+#         List of dictionaries with user_id and score
+#     """
+#     # import csv
+#     # from io import StringIO
     
-    scores = []
-    processed_usernames = set()
+#     scores = []
+#     processed_usernames = set()
     
-    # Parse the CSV content
-    try:
-        csv_file = StringIO(csv_content)
-        csv_reader = csv.DictReader(csv_file)
+#     # Parse the CSV content
+#     try:
+#         csv_file = StringIO(csv_content)
+#         csv_reader = csv.DictReader(csv_file)
         
-        # Check required headers
-        required_headers = ['id','username', 'score']
-        headers = csv_reader.fieldnames
-        print("headers are", headers)
-        # if not all(header in headers for header in required_headers):
-        #     print(f"Warning: Extra headers found: {headers}. Proceeding with parsing.")
-        #     raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
-        print("line")
-        # Process each row
-        for row_num, row in enumerate(csv_reader, start=2):
-            print("hihfi")
-            print("Row is", row)
-            try:
-                username = row['username'].strip()
-                score = int(row['score'])
+#         # Check required headers
+#         required_headers = ['id','username', 'score']
+#         headers = csv_reader.fieldnames
+#         print("headers are", headers)
+#         # if not all(header in headers for header in required_headers):
+#         #     print(f"Warning: Extra headers found: {headers}. Proceeding with parsing.")
+#         #     raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
+#         print("line")
+#         # Process each row
+#         for row_num, row in enumerate(csv_reader, start=2):
+#             print("hihfi")
+#             print("Row is", row)
+#             try:
+#                 username = row['username'].strip()
+#                 score = int(row['score'])
                 
-                user = db.query(User).filter(User.username == username).first()
-                if not user:
-                    raise ValueError(f"User with username '{username}' not found on row {row_num}")
+#                 user = db.query(User).filter(User.username == username).first()
+#                 if not user:
+#                     raise ValueError(f"User with username '{username}' not found on row {row_num}")
 
-                print("User ID is", user_id, "Score is", score)
-                scores.append({
-                    'user_id': user_id,
-                    'score': score
-                })
-                processed_usernames.add(username)
-            except (ValueError, KeyError) as e:
-                # Skip invalid rows but continue processing
-                print(f"Error processing row: {row}. Error: {str(e)}")
-                continue
+#                 print("User ID is", user_id, "Score is", score)
+#                 scores.append({
+#                     'user_id': user_id,
+#                     'score': score
+#                 })
+#                 processed_usernames.add(username)
+#             except (ValueError, KeyError) as e:
+#                 # Skip invalid rows but continue processing
+#                 print(f"Error processing row: {row}. Error: {str(e)}")
+#                 continue
     
-    except Exception as e:
-        raise ValueError(f"Error parsing CSV: {str(e)}")
+#     except Exception as e:
+#         raise ValueError(f"Error parsing CSV: {str(e)}")
     
-    # Get all students from the database and add default score of 0 for missing ones
-        # Get student role ID
-    student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
-    if student_role:
-        students = db.query(User).filter(User.role_id == student_role.id).all()
+#     # Get all students from the database and add default score of 0 for missing ones
+#         # Get student role ID
+#     student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
+#     if student_role:
+#         students = db.query(User).filter(User.role_id == student_role.id).all()
         
-        for student in students:
-            if student.id not in processed_user_ids:
-                scores.append({
-                    'user_id': student.id,
-                    'score': 0
-                })
+#         for student in students:
+#             if student.id not in processed_user_ids:
+#                 scores.append({
+#                     'user_id': student.id,
+#                     'score': 0
+#                 })
     
-    return scores
+#     return scores
 
 
 
