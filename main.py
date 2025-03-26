@@ -1,5 +1,6 @@
 import json
-from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, WebSocket, WebSocketDisconnect, WebSocketException
+# Explicitly import FastAPI's Form and rename it to avoid conflicts
+from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, Form as FastAPIForm, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text
@@ -112,9 +113,10 @@ class Submittable(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role.role != RoleType.PROF:
-            raise ValueError("Only professors can create submittables.")
+        with SessionLocal() as db:
+            user = db.query(User).filter_by(id=value).first()
+            if user and user.role.role != RoleType.PROF:
+                raise ValueError("Only professors can create submittables.")
         return value
 
 class Submission(Base):
@@ -205,7 +207,7 @@ class Announcement(Base):
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     title = Column(String, nullable=False)
-    content = Column(JSONB, nullable=False)
+    content = Column(String, nullable=False)  # Changed from JSONB to String
     url_name = Column(String, unique=True, nullable=True)
     
     @validates("creator_id")
@@ -1180,7 +1182,7 @@ class Show(BaseModel):
     creator_id: int
     created_at: str
     title: str
-    content: dict
+    content: str
     url_name: Optional[str] = None
 
     class Config:
@@ -1188,68 +1190,88 @@ class Show(BaseModel):
 
 @app.post('/announcements', status_code=status.HTTP_201_CREATED)
 async def create(
-    title: Annotated[str, Form()],
-    description: Annotated[str, Form()],
-    file: Union[UploadFile, None] = None,
-    db: Session = Depends(get_db),
+    title: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
 ):
     try:
-        # Handle file upload if provided
-        file_location = None
-        if file and file.filename:
-            file_extension = file.filename.split('.')[-1]
-            file_name = f"{uuid.uuid4()}.{file_extension}"
-            file_location = f"uploads/{file_name}"
-            with open(file_location, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-
-        # Parse description JSON
-        try:
-            description_json = json.loads(description)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
+        # Create file path
+        file_extension = os.path.splitext(file.filename)[1]
+        file_name = f"{uuid.uuid4()}{file_extension}"
+        file_path = os.path.join("uploads", file_name)
         
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Ensure uploads directory exists
+        os.makedirs("uploads", exist_ok=True)
         
-        # Create new announcement
-        new_announcement = Announcement(
-            creator_id=1,
-            created_at=current_time,
+        # Save the file
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        # Create announcement in database
+        db_announcement = Announcement(
             title=title,
-            content=description_json,
-            url_name=file_location
+            content=description,
+            url_name=file_name,
+            creator_id=1  # Default creator ID
         )
-        
-        db.add(new_announcement)
+        db.add(db_announcement)
         db.commit()
-        db.refresh(new_announcement)
+        db.refresh(db_announcement)
         
-        return new_announcement
-        
-    except HTTPException as e:
-        raise e
+        return db_announcement
     except Exception as e:
-        if file_location and os.path.exists(file_location):
-            os.remove(file_location)  # Clean up file if something went wrong
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
+@app.get('/announcements/{announcement_id}/download')
+async def download_announcement_file(
+    announcement_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == announcement_id).first()
+        if not announcement or not announcement.url_name:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        file_path = os.path.join("uploads", announcement.url_name)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return FileResponse(
+            file_path,
+            filename=announcement.url_name,
+            media_type='application/octet-stream'
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get('/announcements', response_model=List[Show])
+def all(db: Session = Depends(get_db)):
+    announcements = db.query(Announcement).order_by(Announcement.created_at.desc()).all()
+    return announcements
 
 @app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
-def destroy(id:int, db:Session=Depends(get_db)):
-    blog=db.query(Announcement).filter(Announcement.id==id)
-    if not blog.first():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
-    if blog.first().url_name and os.path.exists(blog.first().url_name):  # Changed from file_path to url_name
-        os.remove(blog.first().url_name)
-    blog.delete(synchronize_session=False)
+def destroy(id: int, db: Session = Depends(get_db)):
+    announcement = db.query(Announcement).filter(Announcement.id == id).first()
+    if not announcement:
+        raise HTTPException(status_code=404, detail="Announcement not found")
+    
+    # Delete the associated file
+    if announcement.url_name:
+        file_path = os.path.join("uploads", announcement.url_name)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    
+    db.delete(announcement)
     db.commit()
-    return 'done'
+    return None
 
 @app.put('/announcements/{id}', status_code=status.HTTP_202_ACCEPTED)
 def update(
     id: int,
     title: Annotated[str, Form()],
-    description: Annotated[str, Form()],
+    description: Annotated[str, Form()],  # Now expects plain text
     file: UploadFile | None = None,
     db: Session = Depends(get_db)
 ):
@@ -1268,19 +1290,26 @@ def update(
         with open(new_url_name, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     
-    try:
-        description_json = json.loads(description)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
-    
     # Update only the modifiable fields
     announcement.first().title = title
-    announcement.first().content = description_json
+    announcement.first().content = description  # Store description directly as string
     announcement.first().url_name = new_url_name
 
     db.commit()
     db.refresh(announcement.first())
     return {"detail": "Announcement updated", "announcement": announcement.first()}
+
+@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
+def destroy(id:int, db:Session=Depends(get_db)):
+    blog=db.query(Announcement).filter(Announcement.id==id)
+    if not blog.first():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
+    if blog.first().url_name and os.path.exists(blog.first().url_name):  # Changed from file_path to url_name
+        os.remove(blog.first().url_name)
+    blog.delete(synchronize_session=False)
+    db.commit()
+    return 'done'
+
 
 @app.get('/announcements', response_model=List[Show])
 def all(db:Session = Depends(get_db)):
@@ -2454,41 +2483,31 @@ async def download_reference_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
-class SubmittableCreateRequest(BaseModel):
-    title: str
-    opens_at: Optional[str] = None  # ISO 8601 format
-    deadline: str  # ISO 8601 format
-    description: str
-
-    @validator('deadline')
-    def validate_deadline(cls, v):
-        try:
-            datetime.fromisoformat(v)
-            return v
-        except ValueError:
-            raise ValueError("Invalid ISO 8601 format for deadline")
-
-    @validator('opens_at')
-    def validate_opens_at(cls, v):
-        if v is None:
-            return v
-        try:
-            datetime.fromisoformat(v)
-            return v
-        except ValueError:
-            raise ValueError("Invalid ISO 8601 format for opens_at")
 
 @app.post("/submittables/create")
 async def create_submittable(
-    submittable: SubmittableCreateRequest,
-    file: UploadFile = File(...),  # Now accepts a single file
+    title: str = FastAPIForm(...),
+    deadline: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    opens_at: Optional[str] = FastAPIForm(None),
+    file: UploadFile = File(...),
     db: Session = Depends(get_db),
     token: str = Depends(prof_required)
 ):
     """Create a new submittable with a reference file"""
     try:
+        # Basic validation
+        try:
+            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            if opens_at:
+                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
+        
         # Get the creator (professor) from token
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        # Fix: Don't decode the token as it's already decoded by the dependency
+        # payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = token  # The token is already decoded by prof_required dependency
         username = payload.get("sub")
         user = db.query(User).filter(User.username == username).first()
         
@@ -2505,10 +2524,10 @@ async def create_submittable(
 
         # Create submittable in database with file information
         new_submittable = Submittable(
-            title=submittable.title,
-            opens_at=submittable.opens_at,
-            deadline=submittable.deadline,
-            description=submittable.description,
+            title=title,
+            opens_at=opens_at,
+            deadline=deadline,
+            description=description,
             creator_id=user.id,
             file_url=f"/uploads/{file_name}",  # URL path
             original_filename=file.filename
@@ -2522,8 +2541,14 @@ async def create_submittable(
             "message": "Submittable created successfully",
             "submittable_id": new_submittable.id
         })
+    except HTTPException as he:
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)  # Clean up file if validation fails
+        raise he
     except Exception as e:
         db.rollback()
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error creating submittable: {str(e)}")
 
 @app.get("/submittables/{submittable_id}")
@@ -2631,24 +2656,37 @@ async def delete_submittable(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting submittable: {str(e)}")
 
+
 @app.put("/submittables/{submittable_id}")
 async def update_submittable(
     submittable_id: int,
-    submittable: SubmittableCreateRequest,
+    title: str = FastAPIForm(...),
+    deadline: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    opens_at: Optional[str] = FastAPIForm(None),
     file: Optional[UploadFile] = None,
     db: Session = Depends(get_db),
     token: str = Depends(prof_required)
 ):
     """Update a submittable (professors only)"""
     try:
+        # Basic validation
+        try:
+            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            if opens_at:
+                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
+            
         existing_submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
         if not existing_submittable:
             raise HTTPException(status_code=404, detail="Submittable not found")
         
         # Update basic information
-        existing_submittable.opens_at = submittable.opens_at
-        existing_submittable.deadline = submittable.deadline
-        existing_submittable.description = submittable.description
+        existing_submittable.title = title
+        existing_submittable.opens_at = opens_at
+        existing_submittable.deadline = deadline
+        existing_submittable.description = description
         
         # Handle file update if provided
         if file:
@@ -2680,6 +2718,8 @@ async def update_submittable(
         raise he
     except Exception as e:
         db.rollback()
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error updating submittable: {str(e)}")
 
 @app.delete("/submissions/{submission_id}")
