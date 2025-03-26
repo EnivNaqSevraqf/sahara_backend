@@ -3110,17 +3110,150 @@ async def download_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
+@app.get("/feedback/students")
+async def get_student_feedback_info(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get student's team and member data with feedback submission validation"""
+    try:
+        user = current_user["user"]
+        
+        # Check if user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only students can access this endpoint"
+            )
 
-@app.post("/feedback/submit")
-async def submit_feedback(
+        # Check if user has been assigned to a team
+        if not user.teams:
+            raise HTTPException(
+                status_code=404,
+                detail="You have not been assigned to a team"
+            )
+            
+        team = user.teams[0]  # Get the student's team
+
+        # Get all team members including the current user
+        team_members = [
+            {
+                "id": member.id,
+                "name": member.name,
+                "is_current_user": member.id == user.id
+            }
+            for member in team.members
+        ]
+
+        if len(team_members) <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="No team members found to provide feedback for"
+            )
+
+        # Check if user has already submitted feedback
+        existing_submission = db.query(FeedbackSubmission).filter(
+            FeedbackSubmission.submitter_id == user.id,
+            FeedbackSubmission.team_id == team.id
+        ).first()
+
+        # If there's an existing submission, include the feedback details
+        submitted_feedback = None
+        if existing_submission:
+            feedback_details = db.query(FeedbackDetail).filter(
+                FeedbackDetail.submission_id == existing_submission.id
+            ).all()
+            
+            submitted_feedback = {
+                "submission_id": existing_submission.id,
+                "submitted_at": existing_submission.submitted_at.isoformat(),
+                "details": [
+                    {
+                        "member_id": detail.member_id,
+                        "contribution": detail.contribution,
+                        "remarks": detail.remarks
+                    }
+                    for detail in feedback_details
+                ]
+            }
+
+        return {
+            "team_id": team.id,
+            "team_name": team.name,
+            "members": team_members,
+            "submitted_feedback": submitted_feedback
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/feedback/student/submit")
+async def submit_student_feedback(
     feedback: FeedbackSubmissionRequest,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    """Submit feedback for team members"""
     try:
+        user = current_user["user"]
+        
+        # Check if user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only students can submit feedback"
+            )
+
+        # Check if user belongs to the team they're submitting feedback for
+        if not any(team.id == feedback.team_id for team in user.teams):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only submit feedback for your own team"
+            )
+
+        # Check if user has already submitted feedback
+        existing_submission = db.query(FeedbackSubmission).filter(
+            FeedbackSubmission.submitter_id == user.id,
+            FeedbackSubmission.team_id == feedback.team_id
+        ).first()
+
+        if existing_submission:
+            raise HTTPException(
+                status_code=400,
+                detail="You have already submitted feedback for this team"
+            )
+
+        # Validate that all team members are being rated (except the submitter)
+        team = next(team for team in user.teams if team.id == feedback.team_id)
+        expected_member_count = len(team.members)  # Exclude the submitter
+        if len(feedback.details) != expected_member_count:
+            raise HTTPException(
+                status_code=400,
+                detail="Feedback must be provided for all team members"
+            )
+
+        # Validate that the rated members are actually in the team
+        team_member_ids = {member.id for member in team.members}
+        submitted_member_ids = {detail.member_id for detail in feedback.details}
+        if team_member_ids != submitted_member_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Feedback can only be provided for current team members"
+            )
+
+        # Validate total contribution equals 100%
+        total_contribution = sum(detail.contribution for detail in feedback.details)
+        if total_contribution != 100:
+            raise HTTPException(
+                status_code=400,
+                detail="Total contribution must equal 100%"
+            )
+
         # Create feedback submission
         new_submission = FeedbackSubmission(
-            submitter_id=current_user["user"].id,
+            submitter_id=user.id,
             team_id=feedback.team_id,
             submitted_at=datetime.now(timezone.utc)
         )
@@ -3139,59 +3272,10 @@ async def submit_feedback(
 
         db.commit()
         return {"message": "Feedback submitted successfully"}
+    except HTTPException as he:
+        db.rollback()
+        raise he
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/feedback/team/{team_id}/members")
-async def get_team_members(
-    team_id: int,
-    current_user: dict = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    try:
-        # Get team members
-        team = db.query(Team).filter(Team.id == team_id).first()
-        if not team:
-            raise HTTPException(status_code=404, detail="Team not found")
-
-        # Check if user is in the team
-        if current_user["user"] not in team.members:
-            raise HTTPException(status_code=403, detail="User is not a member of this team")
-
-        # Return team members
-        return {
-            "members": [
-                {
-                    "id": member.id,
-                    "name": member.name
-                }
-                for member in team.members
-            ]
-        }
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/feedback/user/team")
-async def get_user_team(
-    current_user: dict = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    try:
-        user = current_user["user"]
-        if not user.teams:
-            raise HTTPException(status_code=404, detail="User is not assigned to any team")
-            
-        team = user.teams[0]  # Assuming a user belongs to one team
-        return {
-            "team_id": team.id,
-            "team_name": team.name
-        }
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ...existing code...
