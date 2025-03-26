@@ -2487,7 +2487,7 @@ async def create_submittable(
             deadline=deadline,
             description=description,
             creator_id=user.id,
-            file_url=f"/uploads/{file_name}",  # URL path
+            file_url=f"uploads/{file_name}",  # URL path without leading slash
             original_filename=file.filename
         )
         
@@ -2662,7 +2662,7 @@ async def update_submittable(
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
             
-            existing_submittable.file_url = f"/uploads/{file_name}"
+            existing_submittable.file_url = f"uploads/{file_name}"
             existing_submittable.original_filename = file.filename
         
         db.commit()
