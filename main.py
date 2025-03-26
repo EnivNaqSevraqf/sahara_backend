@@ -564,6 +564,7 @@ class GradeableCreateRequest(BaseModel):
     #description: str
     #due_date: str  # ISO 8601 format
     max_points: int
+    file: UploadFile = File(...) # CSV file
     
     # @validator('due_date')
     # def validate_due_date(cls, v):
@@ -2080,6 +2081,12 @@ async def get_gradeable_submissions(
         })
     return JSONResponse(status_code=200, content=results)
 
+# @app.post("/gradeables/create")
+# async def create_gradeable(
+#     gradeable: GradeableCreateRequest,
+#     file: UploadFile = File(...),
+# )
+
 @app.post("/gradeables/{gradeable_id}/upload-scores")
 async def upload_gradeable_scores(
     gradeable_id: int,
@@ -2175,6 +2182,7 @@ async def create_gradeable(
         db.add(new_gradeable)
         db.commit()
         db.refresh(new_gradeable)
+        print(new_gradeable.id)
         print("HELLO")
 
         
@@ -2191,79 +2199,86 @@ async def create_gradeable(
             detail=f"Error creating gradeable: {str(e)}"
         )
 
-def parse_scores_from_csv(csv_content: str, 
-    gradeable_id: int, 
-    max_points: int,
-    db: Session) -> List[Dict[str, Any]]:
+def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, db: Session) -> List[Dict[str, Any]]:
     """
     Parse CSV content containing user scores.
-    Expected CSV format: user_id,score
+    Expected CSV format: username,score
     First row should be headers.
     
-    Also assigns a default score of 0 to any student who doesn't have a score in the CSV.
+    Parameters:
+    - csv_content: CSV file content as string
+    - gradeable_id: ID of the gradeable
+    - max_points: Maximum points possible
+    - db: Database session
     
     Returns:
-        List of dictionaries with user_id and score
+        List of dictionaries with user_id, gradeable_id and score
     """
-    # import csv
-    # from io import StringIO
-    
     scores = []
-    processed_usernames = set()
+    processed_user_ids = set()
     
-    # Parse the CSV content
     try:
         csv_file = StringIO(csv_content)
         csv_reader = csv.DictReader(csv_file)
         
-        # Check required headers
-        required_headers = ['id','username', 'score']
-        headers = csv_reader.fieldnames
-        print("headers are", headers)
-        # if not all(header in headers for header in required_headers):
-        #     print(f"Warning: Extra headers found: {headers}. Proceeding with parsing.")
-        #     raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
-        print("line")
-        # Process each row
+        # Verify required headers
+        required_headers = {'username', 'score'}
+        if not all(header in csv_reader.fieldnames for header in required_headers):
+            raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
+        
+        # Process each row in CSV
         for row_num, row in enumerate(csv_reader, start=2):
-            print("hihfi")
-            print("Row is", row)
             try:
+                # Extract and validate username
                 username = row['username'].strip()
-                score = int(row['score'])
+                if not username:
+                    continue
                 
+                # Extract and validate score
+                try:
+                    score = int(row['score'])
+                    if score < 0 or score > max_points:
+                        raise ValueError(f"Score must be between 0 and {max_points}")
+                except ValueError:
+                    raise ValueError(f"Invalid score format in row {row_num}")
+                
+                # Get user ID from username
                 user = db.query(User).filter(User.username == username).first()
                 if not user:
-                    raise ValueError(f"User with username '{username}' not found on row {row_num}")
-
-                print("User ID is", user_id, "Score is", score)
+                    raise ValueError(f"User with username '{username}' not found")
+                
                 scores.append({
-                    'user_id': user_id,
+                    'user_id': user.id,
+                    'gradeable_id': gradeable_id,
                     'score': score
                 })
-                processed_usernames.add(username)
-            except (ValueError, KeyError) as e:
-                # Skip invalid rows but continue processing
-                print(f"Error processing row: {row}. Error: {str(e)}")
+                processed_user_ids.add(user.id)
+                
+            except ValueError as e:
+                print(f"Warning: Skipping row {row_num}: {str(e)}")
                 continue
-    
-    except Exception as e:
-        raise ValueError(f"Error parsing CSV: {str(e)}")
-    
-    # Get all students from the database and add default score of 0 for missing ones
-        # Get student role ID
-    student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
-    if student_role:
-        students = db.query(User).filter(User.role_id == student_role.id).all()
         
+        # Get student role ID
+        student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
+        if not student_role:
+            raise ValueError("Student role not found in database")
+        
+        # Add default score of 0 for students not in CSV
+        students = db.query(User).filter(User.role_id == student_role.id).all()
         for student in students:
             if student.id not in processed_user_ids:
                 scores.append({
                     'user_id': student.id,
+                    'gradeable_id': gradeable_id,
                     'score': 0
                 })
-    
-    return scores
+        
+        return scores
+        
+    except csv.Error as e:
+        raise ValueError(f"Error parsing CSV file: {str(e)}")
+    except Exception as e:
+        raise ValueError(f"Unexpected error processing CSV: {str(e)}")
 
 
 
