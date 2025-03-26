@@ -188,9 +188,10 @@ class Form(Base):
     @validates("target_type", "target_id")
     def validate_target(self, key, value):
         if self.target_type == RoleType.ROLE:
-            role = SessionLocal.query(Role).filter_by(id=self.target_id).first()
-            if role and role.name == RoleType.PROFESSOR:
-                raise ValueError("Forms cannot be assigned to Professors.")
+            with SessionLocal() as session:
+                role = session.query(Role).filter_by(id=self.target_id).first()
+                if role and role.name == RoleType.PROFESSOR:
+                    raise ValueError("Forms cannot be assigned to Professors.")
         return value
 
 team_members = Table(
@@ -235,8 +236,8 @@ class Gradeable(Base):
     __tablename__ = "gradeables"
     id = Column(Integer, primary_key=True)
     title = Column(String, nullable=False)
-    description = Column(String, nullable=False)
-    due_date = Column(String, nullable=False)
+    #description = Column(String, nullable=True)
+    #due_date = Column(String, nullable=False)
     max_points = Column(Integer, nullable=False)
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
@@ -246,10 +247,11 @@ class Gradeable(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role == RoleType.STUDENT:
-            raise ValueError("Students cannot create gradeables.")
-        return value
+        with SessionLocal() as session:
+            user = session.query(User).filter_by(id=value).first()
+            if user and user.role == RoleType.STUDENT:
+                raise ValueError("Students cannot create gradeables.")
+            return value
     
 class GradeableScores(Base):
     __tablename__ = "gradeable_scores"
@@ -257,7 +259,7 @@ class GradeableScores(Base):
     gradeable_id = Column(Integer, ForeignKey("gradeables.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     score = Column(Integer, nullable=False)
-    feedback = Column(String, nullable=True)
+    #feedback = Column(String, nullable=True)
 
     gradeable = relationship("Gradeable", back_populates="scores")
     user = relationship("User", back_populates="gradeable_scores")
@@ -296,10 +298,11 @@ class UserCalendarEvent(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role == RoleType.STUDENT:
-            raise ValueError("Students cannot create calendar events.")
-        return value
+        with SessionLocal() as session:
+            user = session.query(User).filter_by(id=value).first()
+            if user and user.role == RoleType.STUDENT:
+                raise ValueError("Students cannot create calendar events.")
+            return value
 
 class TeamCalendarEvent(Base):
     __tablename__ = "team_calendar_events"
@@ -315,10 +318,11 @@ class TeamCalendarEvent(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role == RoleType.STUDENT:
-            raise ValueError("Students cannot create calendar events.")
-        return value
+        with SessionLocal() as session:
+            user = session.query(User).filter_by(id=value).first()
+            if user and user.role == RoleType.STUDENT:
+                raise ValueError("Students cannot create calendar events.")
+            return value
     
 class Team_TA(Base):
     __tablename__ = "team_tas"
@@ -557,18 +561,18 @@ class AssignTeamSkillsRequest(BaseModel):
 
 class GradeableCreateRequest(BaseModel):
     title: str
-    description: str
-    due_date: str  # ISO 8601 format
+    #description: str
+    #due_date: str  # ISO 8601 format
     max_points: int
     
-    @validator('due_date')
-    def validate_due_date(cls, v):
-        try:
-            # Validate ISO 8601 format
-            datetime.fromisoformat(v.replace('Z', '+00:00'))
-            return v
-        except ValueError:
-            raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
+    # @validator('due_date')
+    # def validate_due_date(cls, v):
+    #     try:
+    #         # Validate ISO 8601 format
+    #         datetime.fromisoformat(v.replace('Z', '+00:00'))
+    #         return v
+    #     except ValueError:
+    #         raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
             
     @validator('max_points')
     def validate_max_points(cls, v):
@@ -681,11 +685,6 @@ def resolve_token(token: str = Header(None)):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-def check_user_permitted(user_id: int, role: RoleType):
-    user = SessionLocal.query(User).filter_by(id=user_id).first()
-    if user.role.role != role:
-        raise HTTPException(status_code=403, detail="User does not have permission to access this resource")
-
 # Authentication dependencies
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
@@ -773,12 +772,11 @@ def prof_or_ta_required(token: str = Depends(oauth2_scheme), db: Session = Depen
         username = payload.get("sub")
         if not username:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
-            
+        
         # Check if user exists
         user = db.query(User).filter(User.username == username).first()
         if not user:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
-            
         # Check if user is a professor or TA
         role = db.query(Role).filter(Role.id == user.role_id).first()
         if role.role not in [RoleType.PROF, RoleType.TA]:
@@ -786,7 +784,6 @@ def prof_or_ta_required(token: str = Depends(oauth2_scheme), db: Session = Depen
                 status_code=status.HTTP_403_FORBIDDEN, 
                 detail="Not authorized, professor or TA access required"
             )
-            
         return payload
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
@@ -1193,41 +1190,82 @@ class Show(BaseModel):
 
 @app.post('/announcements', status_code=status.HTTP_201_CREATED)
 async def create(
-    title: Annotated[str, Form()],
-    description: Annotated[str, Form()],
-    file: UploadFile | None = None,  # Changed this line
-    db: Session = Depends(get_db),
+    title: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
 ):
     try:
-        file_location = None
-        if file and file.filename:  # Only process if file exists and has filename
-            file_extension = file.filename.split('.')[-1]
-            file_name = f"{uuid.uuid4()}.{file_extension}"
-            file_location = f"uploads/{file_name}"
-            with open(file_location, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Create file path
+        file_extension = os.path.splitext(file.filename)[1]
+        file_name = f"{uuid.uuid4()}{file_extension}"
+        file_path = os.path.join("uploads", file_name)
         
-        new_announcement = Announcement(
-            creator_id=1,
-            created_at=current_time,
+        # Ensure uploads directory exists
+        os.makedirs("uploads", exist_ok=True)
+        
+        # Save the file
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        # Create announcement in database
+        db_announcement = Announcement(
             title=title,
             content=description,
-            url_name=file_location
+            url_name=file_name,
+            creator_id=1  # Default creator ID
         )
-        
-        db.add(new_announcement)
+        db.add(db_announcement)
         db.commit()
-        db.refresh(new_announcement)
+        db.refresh(db_announcement)
         
-        return new_announcement
-        
+        return db_announcement
     except Exception as e:
-        if file_location and os.path.exists(file_location):
-            os.remove(file_location)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get('/announcements/{announcement_id}/download')
+async def download_announcement_file(
+    announcement_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == announcement_id).first()
+        if not announcement or not announcement.url_name:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        file_path = os.path.join("uploads", announcement.url_name)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return FileResponse(
+            file_path,
+            filename=announcement.url_name,
+            media_type='application/octet-stream'
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get('/announcements', response_model=List[Show])
+def all(db: Session = Depends(get_db)):
+    announcements = db.query(Announcement).order_by(Announcement.created_at.desc()).all()
+    return announcements
+
+@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
+def destroy(id: int, db: Session = Depends(get_db)):
+    announcement = db.query(Announcement).filter(Announcement.id == id).first()
+    if not announcement:
+        raise HTTPException(status_code=404, detail="Announcement not found")
     
+    # Delete the associated file
+    if announcement.url_name:
+        file_path = os.path.join("uploads", announcement.url_name)
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    
+    db.delete(announcement)
+    db.commit()
+    return None
 
 @app.put('/announcements/{id}', status_code=status.HTTP_202_ACCEPTED)
 def update(
@@ -1987,7 +2025,7 @@ def setbetaTestPairs(db: Session = Depends(get_db)):
 @app.get("/gradeables/")
 async def get_gradeable_table(
     db: Session = Depends(get_db),
-    #token: str = Depends(prof_or_ta_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """
     Get the gradeable table for professors and TAs
@@ -1998,11 +2036,8 @@ async def get_gradeable_table(
         results.append({
             "id": gradeable.id,
             "title": gradeable.title,
-            "description": gradeable.description,
-            "due_date": gradeable.due_date,
             "max_points": gradeable.max_points,
             "creator_id": gradeable.creator_id,
-            "created_at": gradeable.created_at
         })
     return JSONResponse(status_code=200, content=results)
 
@@ -2010,7 +2045,7 @@ async def get_gradeable_table(
 async def get_gradeable_by_id(
     gradeable_id: int,
     db: Session = Depends(get_db),
-    # token: str = Depends(prof_or_ta_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """
     Get a specific gradeable by ID
@@ -2022,17 +2057,12 @@ async def get_gradeable_by_id(
     return JSONResponse(status_code=200, content={
         "id": gradeable.id,
         "title": gradeable.title,
-        "description": gradeable.description,
-        "due_date": gradeable.due_date,
-        "created_at": gradeable.created_at,
-
-        #"updated_at": gradeable.updated_at
     })
 @app.get("/gradeables/{gradeable_id}/scores")
 async def get_gradeable_submissions(
     gradeable_id: int,
     db: Session = Depends(get_db),
-    # token: str = Depends(prof_or_ta_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """
     Get all submissions for a specific gradeable
@@ -2050,7 +2080,7 @@ async def get_gradeable_submissions(
         })
     return JSONResponse(status_code=200, content=results)
 
-@app.get("/gradeables/{gradeable_id}/upload-scores")
+@app.post("/gradeables/{gradeable_id}/upload-scores")
 async def upload_gradeable_scores(
     gradeable_id: int,
     file: UploadFile = File(...),
@@ -2068,29 +2098,40 @@ async def upload_gradeable_scores(
         )
     
     try:
-        # Read file content
+        # Validate gradeable exists and get max points
+        gradeable = db.query(Gradeable).filter(Gradeable.id == gradeable_id).first()
+        if not gradeable:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Gradeable not found"
+            )
+        
+        # Read and parse file content
         content = await file.read()
         content_str = content.decode('utf-8')
         
-        # Parse CSV content
-        scores = parse_scores_from_csv(content_str)
+        # Parse scores with detailed validation
+        scores = parse_scores_from_csv(
+            csv_content=content_str, 
+            gradeable_id=gradeable_id, 
+            max_points=gradeable.max_points,
+            db=db
+        )
         
-        # Update scores in the database
-        for score in scores:
-            submission = db.query(GradeableScores).filter(
+        # Bulk upsert scores
+        for score_data in scores:
+            existing_submission = db.query(GradeableScores).filter(
                 GradeableScores.gradeable_id == gradeable_id,
-                GradeableScores.user_id == score["user_id"]
+                GradeableScores.user_id == score_data["user_id"]
             ).first()
             
-            if submission:
-                submission.score = score["score"]
-                submission.submitted_at = datetime.now(timezone.utc).isoformat()
+            if existing_submission:
+                existing_submission.score = score_data["score"]
             else:
                 new_submission = GradeableScores(
-                    user_id=score["user_id"],
+                    user_id=score_data["user_id"],
                     gradeable_id=gradeable_id,
-                    score=score["score"],
-                    submitted_at=datetime.now(timezone.utc).isoformat()
+                    score=score_data["score"]
                 )
                 db.add(new_submission)
         
@@ -2101,63 +2142,59 @@ async def upload_gradeable_scores(
             "gradeable_id": gradeable_id,
             "total_submissions": len(scores)
         })
+    
+    except ValueError as ve:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error uploading scores: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error uploading scores: {str(e)}")
+        
+        
 
 @app.post("/gradeables/create")
 async def create_gradeable(
     gradeable: GradeableCreateRequest,
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
+    user_data: User = Depends(prof_or_ta_required),
+    db: Session = Depends(get_db)
 ):
-    """
-    Create a new gradeable
-    """
+    """Create a new gradeable"""
+    print("HI")
+    username = user_data.get('sub')
+    user = db.query(User).filter(User.username == username).first()
+    print("2137")
     try:
-        # Extract the token payload to get the creator ID (username)
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        user = db.query(User).filter(User.username == username).first()
-        
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Check if a gradeable with the same title already exists
-        existing_gradeable = db.query(Gradeable).filter(Gradeable.title == gradeable.title).first()
-        if existing_gradeable:
-            raise HTTPException(status_code=400, detail="Gradeable with this title already exists")
-        
-        # Create new gradeable
+        print("Title is", gradeable.title, "Max points is", gradeable.max_points, "Creator ID is", user.id)
         new_gradeable = Gradeable(
             title=gradeable.title,
-            description=gradeable.description,
-            due_date=gradeable.due_date,
             max_points=gradeable.max_points,
-            creator_id=user.id,
-            created_at=datetime.now(timezone.utc).isoformat()
+            creator_id=user.id
         )
         
+        print("Hello")
         db.add(new_gradeable)
         db.commit()
         db.refresh(new_gradeable)
+        print("HELLO")
+
         
         return JSONResponse(status_code=201, content={
-            "id": new_gradeable.id,
+            #"id": new_gradeable.id,
             "title": new_gradeable.title,
-            "description": new_gradeable.description,
-            "due_date": new_gradeable.due_date,
             "max_points": new_gradeable.max_points,
             "creator_id": new_gradeable.creator_id,
-            "created_at": new_gradeable.created_at
         })
-    except HTTPException as he:
-        raise he
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error creating gradeable: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error creating gradeable: {str(e)}"
+        )
 
-def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
+def parse_scores_from_csv(csv_content: str, 
+    gradeable_id: int, 
+    max_points: int,
+    db: Session) -> List[Dict[str, Any]]:
     """
     Parse CSV content containing user scores.
     Expected CSV format: user_id,score
@@ -2172,7 +2209,7 @@ def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
     # from io import StringIO
     
     scores = []
-    processed_user_ids = set()
+    processed_usernames = set()
     
     # Parse the CSV content
     try:
@@ -2180,23 +2217,31 @@ def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
         csv_reader = csv.DictReader(csv_file)
         
         # Check required headers
-        required_headers = ['user_id', 'score']
+        required_headers = ['id','username', 'score']
         headers = csv_reader.fieldnames
-        
-        if not all(header in headers for header in required_headers):
-            raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
-        
+        print("headers are", headers)
+        # if not all(header in headers for header in required_headers):
+        #     print(f"Warning: Extra headers found: {headers}. Proceeding with parsing.")
+        #     raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
+        print("line")
         # Process each row
-        for row in csv_reader:
+        for row_num, row in enumerate(csv_reader, start=2):
+            print("hihfi")
+            print("Row is", row)
             try:
-                user_id = int(row['user_id'])
+                username = row['username'].strip()
                 score = int(row['score'])
                 
+                user = db.query(User).filter(User.username == username).first()
+                if not user:
+                    raise ValueError(f"User with username '{username}' not found on row {row_num}")
+
+                print("User ID is", user_id, "Score is", score)
                 scores.append({
                     'user_id': user_id,
                     'score': score
                 })
-                processed_user_ids.add(user_id)
+                processed_usernames.add(username)
             except (ValueError, KeyError) as e:
                 # Skip invalid rows but continue processing
                 print(f"Error processing row: {row}. Error: {str(e)}")
@@ -2206,20 +2251,17 @@ def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
         raise ValueError(f"Error parsing CSV: {str(e)}")
     
     # Get all students from the database and add default score of 0 for missing ones
-    with SessionLocal() as db:
         # Get student role ID
-        student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
-        if student_role:
-            # Get all student users
-            students = db.query(User).filter(User.role_id == student_role.id).all()
-            
-            # Add default score of 0 for students not in the CSV
-            for student in students:
-                if student.id not in processed_user_ids:
-                    scores.append({
-                        'user_id': student.id,
-                        'score': 0
-                    })
+    student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
+    if student_role:
+        students = db.query(User).filter(User.role_id == student_role.id).all()
+        
+        for student in students:
+            if student.id not in processed_user_ids:
+                scores.append({
+                    'user_id': student.id,
+                    'score': 0
+                })
     
     return scores
 
