@@ -592,10 +592,8 @@ class AssignTeamSkillsRequest(BaseModel):
     skill_ids: List[int]
 
 class GradeableCreateRequest(BaseModel):
-    title: str
-    #description: str
-    #due_date: str  # ISO 8601 format
-    max_points: int
+    title: str = FastAPIForm(...)
+    # max_points: str = FastAPIForm(...)
     
     # @validator('due_date')
     # def validate_due_date(cls, v):
@@ -606,11 +604,11 @@ class GradeableCreateRequest(BaseModel):
     #     except ValueError:
     #         raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
             
-    @validator('max_points')
-    def validate_max_points(cls, v):
-        if v <= 0:
-            raise ValueError("Maximum points must be greater than zero")
-        return v
+    # @validator('max_points')
+    # def validate_max_points(cls, v):
+    #     if v <= 0:
+    #         raise ValueError("Maximum points must be greater than zero")
+    #     return v
 
 app = FastAPI()
 
@@ -2177,6 +2175,87 @@ async def get_gradeable_by_id(
         "id": gradeable.id,
         "title": gradeable.title,
     })
+
+def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, db: Session) -> List[Dict[str, Any]]:
+    """
+    Parse CSV content containing user scores.
+    Expected CSV format: username,score
+    First row should be headers.
+    
+    Parameters:
+    - csv_content: CSV file content as string
+    - gradeable_id: ID of the gradeable
+    - max_points: Maximum points possible
+    - db: Database session
+    
+    Returns:
+        List of dictionaries with user_id, gradeable_id and score
+    """
+    scores = []
+    processed_user_ids = set()
+    
+    try:
+        csv_file = StringIO(csv_content)
+        csv_reader = csv.DictReader(csv_file)
+        
+        # Verify required headers
+        # required_headers = {'username', 'score'}
+        # if not all(header in csv_reader.fieldnames for header in required_headers):
+        #     raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
+        
+        # Process each row in CSV
+        for row_num, row in enumerate(csv_reader, start=2):
+            try:
+                # Extract and validate username
+                username = row['username'].strip()
+                if not username:
+                    continue
+                
+                # Extract and validate score
+                try:
+                    score = int(row['score'])
+                    if score < 0 or score > max_points:
+                        raise ValueError(f"Score must be between 0 and {max_points}")
+                except ValueError:
+                    raise ValueError(f"Invalid score format in row {row_num}")
+                
+                # Get user ID from username
+                user = db.query(User).filter(User.username == username).first()
+                if not user:
+                    raise ValueError(f"User with username '{username}' not found")
+                print(user.id)
+                scores.append({
+                    'user_id': user.id,
+                    'gradeable_id': gradeable_id,
+                    'score': score
+                })
+                processed_user_ids.add(user.id)
+                
+            except ValueError as e:
+                print(f"Warning: Skipping row {row_num}: {str(e)}")
+                continue
+        
+        # Get student role ID
+        student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
+        if not student_role:
+            raise ValueError("Student role not found in database")
+        
+        # Add default score of 0 for students not in CSV
+        students = db.query(User).filter(User.role_id == student_role.id).all()
+        for student in students:
+            if student.id not in processed_user_ids:
+                scores.append({
+                    'user_id': student.id,
+                    'gradeable_id': gradeable_id,
+                    'score': 0
+                })
+        
+        return scores
+        
+    except csv.Error as e:
+        raise ValueError(f"Error parsing CSV file: {str(e)}")
+    except Exception as e:
+        raise ValueError(f"Unexpected error processing CSV: {str(e)}")
 @app.get("/gradeables/{gradeable_id}/scores")
 async def get_gradeable_submissions(
     gradeable_id: int,
@@ -2198,6 +2277,12 @@ async def get_gradeable_submissions(
             "score": submission.score
         })
     return JSONResponse(status_code=200, content=results)
+
+# @app.post("/gradeables/create")
+# async def create_gradeable(
+#     gradeable: GradeableCreateRequest,
+#     file: UploadFile = File(...),
+# )
 
 # @app.post("/gradeables/{gradeable_id}/upload-scores")
 # async def upload_gradeable_scores(
@@ -2273,20 +2358,22 @@ async def get_gradeable_submissions(
 
 @app.post("/gradeables/create")
 async def create_gradeable(
-    gradeable: GradeableCreateRequest,
+    # gradeable: GradeableCreateRequest,
+    title: str = FastAPIForm(...),
+    max_points: str = FastAPIForm(...),
+    file: UploadFile = File(...), # CSV file,
     user_data: User = Depends(prof_or_ta_required),
     db: Session = Depends(get_db)
 ):
     """Create a new gradeable"""
-    print("HI")
     username = user_data.get('sub')
     user = db.query(User).filter(User.username == username).first()
     print("2137")
     try:
-        print("Title is", gradeable.title, "Max points is", gradeable.max_points, "Creator ID is", user.id)
+        print("Title is", title, "Max points is", max_points, "Creator ID is", user.id)
         new_gradeable = Gradeable(
-            title=gradeable.title,
-            max_points=gradeable.max_points,
+            title=title,
+            max_points=int(max_points),
             creator_id=user.id
         )
         
@@ -2294,13 +2381,41 @@ async def create_gradeable(
         db.add(new_gradeable)
         db.commit()
         db.refresh(new_gradeable)
+        print(new_gradeable.id)
         print("HELLO")
 
+        # Read and parse file content
+        content = await file.read()
+        content_str = content.decode('utf-8')
+        scores = parse_scores_from_csv(
+            csv_content=content_str, 
+            gradeable_id=new_gradeable.id, 
+            max_points=new_gradeable.max_points,
+            db=db
+        )
+        gradeable_id = new_gradeable.id
+        for score_data in scores:
+            existing_submission = db.query(GradeableScores).filter(
+                GradeableScores.gradeable_id == gradeable_id,
+                GradeableScores.user_id == score_data["user_id"]
+            ).first()
+            
+            if existing_submission:
+                existing_submission.score = score_data["score"]
+            else:
+                new_submission = GradeableScores(
+                    user_id=score_data["user_id"],
+                    gradeable_id=gradeable_id,
+                    score=score_data["score"]
+                )
+                db.add(new_submission)
+        
+        db.commit()
         
         return JSONResponse(status_code=201, content={
-            #"id": new_gradeable.id,
+            "id": new_gradeable.id,
             "title": new_gradeable.title,
-            "max_points": new_gradeable.max_points,
+            "max_points": int(new_gradeable.max_points),
             "creator_id": new_gradeable.creator_id,
         })
     except Exception as e:
@@ -2309,6 +2424,7 @@ async def create_gradeable(
             status_code=500,
             detail=f"Error creating gradeable: {str(e)}"
         )
+
 
 # def parse_scores_from_csv(csv_content: str, 
 #     gradeable_id: int, 
