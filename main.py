@@ -179,6 +179,7 @@ class User(Base):
     gradeable_scores = relationship("GradeableScores", back_populates="user")
     submittables = relationship("Submittable", back_populates="creator", lazy="joined")
     messages = relationship("Message", back_populates="sender")
+    quiz_responses = relationship("QuizResponse", back_populates="user")
     
     @validates('skills')
     def validate_skills(self, key, skill):
@@ -226,6 +227,28 @@ team_members = Table(
     Column("user_id", Integer, ForeignKey("users.id"), primary_key=True)
 )
 
+class Quiz(Base):
+    __tablename__ = "quizzes"
+    id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)
+    description = Column(String, nullable=True)
+    created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+    deadline = Column(String, nullable=False)  # ISO 8601 format
+    quiz_json = Column(JSONB, nullable=False)
+
+    responses = relationship("QuizResponse", back_populates="quiz")
+
+class QuizResponse(Base):
+    __tablename__ = "quiz_responses"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    quiz_id = Column(Integer, ForeignKey("quizzes.id"), nullable=False)
+    submitted_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+    quiz_score = Column(Integer, nullable=False)
+    response_data = Column(JSONB, nullable=False)  # JSON or serialized response data
+
+    quiz = relationship("Quiz", back_populates="responses")
+    user = relationship("User", back_populates="quiz_responses")
 
 class Announcement(Base):
     __tablename__ = "announcements"
@@ -1590,7 +1613,7 @@ def get_all_forms_db(user_id: Optional[int] = None, db: Session = None) -> List[
 
 # Form-related endpoints
 @app.post("/api/forms/create")
-async def api_create_form(form_data: FormCreateRequest, db: Session = Depends(get_db)):
+async def api_create_form(form_data: FormCreateRequest, token: str = Depends(prof_or_ta_required), db: Session = Depends(get_db)):
     """Create a new form"""
     result = create_form_db(form_data, db)
     return JSONResponse(status_code=201, content=result)
@@ -1623,9 +1646,9 @@ async def api_check_deadline(form_id: int, db: Session = Depends(get_db)):
     )
 
 @app.post("/api/get_forms")
-async def api_get_forms(user: UserIdRequest, db: Session = Depends(get_db)):
+async def api_get_forms(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get all forms with info about whether the user has submitted a response"""
-    forms = get_all_forms_db(user.user_id, db)
+    forms = get_all_forms_db(user.id, db)
     return JSONResponse(status_code=200, content=forms)
 
 @app.get("/api/forms/{form_id}/user/{user_id}")
