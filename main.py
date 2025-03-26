@@ -2,7 +2,7 @@ import json
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text
+from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, validates
 from sqlalchemy.dialects.postgresql import JSONB, insert
@@ -353,6 +353,38 @@ class TeamSkill(Base):
 
 class UserSkill(Base):
     __tablename__ = "user_skills"
+    
+# First, add these models after your existing models
+
+class FeedbackSubmission(Base):
+    __tablename__ = "feedback_submissions"
+    id = Column(Integer, primary_key=True)
+    submitter_id = Column(Integer, ForeignKey("users.id"))
+    team_id = Column(Integer, ForeignKey("teams.id"))
+    submitted_at = Column(DateTime, default=datetime.now(timezone.utc))
+    submitter = relationship("User", foreign_keys=[submitter_id])
+    team = relationship("Team")
+    details = relationship("FeedbackDetail", back_populates="submission")
+
+class FeedbackDetail(Base):
+    __tablename__ = "feedback_details"
+    id = Column(Integer, primary_key=True)
+    submission_id = Column(Integer, ForeignKey("feedback_submissions.id"))
+    member_id = Column(Integer, ForeignKey("users.id"))
+    contribution = Column(Float)
+    remarks = Column(Text)
+    submission = relationship("FeedbackSubmission", back_populates="details")
+    member = relationship("User", foreign_keys=[member_id])
+
+# Add these Pydantic models for request validation
+class FeedbackDetailRequest(BaseModel):
+    member_id: int
+    contribution: float
+    remarks: str
+
+class FeedbackSubmissionRequest(BaseModel):
+    team_id: int
+    details: List[FeedbackDetailRequest]
 
 def get_db():
     db = SessionLocal()
@@ -3077,3 +3109,89 @@ async def download_file(
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+
+
+@app.post("/feedback/submit")
+async def submit_feedback(
+    feedback: FeedbackSubmissionRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        # Create feedback submission
+        new_submission = FeedbackSubmission(
+            submitter_id=current_user["user"].id,
+            team_id=feedback.team_id,
+            submitted_at=datetime.now(timezone.utc)
+        )
+        db.add(new_submission)
+        db.flush()  # Get the ID before committing
+
+        # Create feedback details
+        for detail in feedback.details:
+            new_detail = FeedbackDetail(
+                submission_id=new_submission.id,
+                member_id=detail.member_id,
+                contribution=detail.contribution,
+                remarks=detail.remarks
+            )
+            db.add(new_detail)
+
+        db.commit()
+        return {"message": "Feedback submitted successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/feedback/team/{team_id}/members")
+async def get_team_members(
+    team_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        # Get team members
+        team = db.query(Team).filter(Team.id == team_id).first()
+        if not team:
+            raise HTTPException(status_code=404, detail="Team not found")
+
+        # Check if user is in the team
+        if current_user["user"] not in team.members:
+            raise HTTPException(status_code=403, detail="User is not a member of this team")
+
+        # Return team members
+        return {
+            "members": [
+                {
+                    "id": member.id,
+                    "name": member.name
+                }
+                for member in team.members
+            ]
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/feedback/user/team")
+async def get_user_team(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        user = current_user["user"]
+        if not user.teams:
+            raise HTTPException(status_code=404, detail="User is not assigned to any team")
+            
+        team = user.teams[0]  # Assuming a user belongs to one team
+        return {
+            "team_id": team.id,
+            "team_name": team.name
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ...existing code...
