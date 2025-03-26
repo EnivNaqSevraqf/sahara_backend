@@ -1254,21 +1254,26 @@ def all(db: Session = Depends(get_db)):
     announcements = db.query(Announcement).order_by(Announcement.created_at.desc()).all()
     return announcements
 
-@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
-def destroy(id: int, db: Session = Depends(get_db)):
-    announcement = db.query(Announcement).filter(Announcement.id == id).first()
+@app.delete('/announcements/{announcement_id}')
+def destroy(announcement_id: int, db: Session = Depends(get_db)):
+    announcement = db.query(Announcement).filter(Announcement.id == announcement_id).first()
     if not announcement:
         raise HTTPException(status_code=404, detail="Announcement not found")
     
-    # Delete the associated file
-    if announcement.url_name:
-        file_path = os.path.join("uploads", announcement.url_name)
-        if os.path.exists(file_path):
-            os.remove(file_path)
-    
-    db.delete(announcement)
-    db.commit()
-    return None
+    try:
+        # Delete the associated file if it exists
+        if announcement.url_name:
+            file_path = os.path.join("uploads", announcement.url_name)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        
+        # Delete the announcement from database
+        db.delete(announcement)
+        db.commit()
+        return {"message": "Announcement deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting announcement: {str(e)}")
 
 @app.put('/announcements/{id}', status_code=status.HTTP_202_ACCEPTED)
 def update(
