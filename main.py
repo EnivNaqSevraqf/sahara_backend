@@ -1227,6 +1227,7 @@ async def create(
     file: UploadFile = File(None),
     db: Session = Depends(get_db)
 ):
+    saved_file_path = None
     try:
         # Create file path and url_name
         url_name = None
@@ -1234,13 +1235,13 @@ async def create(
             # Create file path
             file_extension = os.path.splitext(file.filename)[1]
             file_name = f"{uuid.uuid4()}{file_extension}"
-            file_path = os.path.join("uploads", file_name)
+            saved_file_path = os.path.join("uploads", file_name)
             
             # Ensure uploads directory exists
             os.makedirs("uploads", exist_ok=True)
             
             # Save the file
-            with open(file_path, "wb") as buffer:
+            with open(saved_file_path, "wb") as buffer:
                 content = await file.read()
                 buffer.write(content)
             
@@ -1259,6 +1260,13 @@ async def create(
         
         return db_announcement
     except Exception as e:
+        db.rollback()
+        # Only delete the file if database operation failed
+        if saved_file_path and os.path.exists(saved_file_path):
+            try:
+                os.remove(saved_file_path)
+            except OSError:
+                pass  # Ignore file deletion errors during cleanup
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/announcements/{id}/download')
@@ -1312,7 +1320,10 @@ def destroy(id: int, db: Session = Depends(get_db)):
         if announcement.url_name:
             file_path = os.path.join("uploads", announcement.url_name)
             if os.path.exists(file_path):
-                os.remove(file_path)
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    print(f"Error deleting file: {e}")  # Log error but continue with announcement deletion
         
         # Delete the announcement from database
         db.delete(announcement)
@@ -1324,54 +1335,87 @@ def destroy(id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Error deleting announcement: {str(e)}")
 
 @app.put('/announcements/{id}', status_code=status.HTTP_202_ACCEPTED)
-def update(
+async def update(
     id: int,
-    title: Annotated[str, Form()],
-    description: Annotated[str, Form()],  # Now expects plain text
-    file: UploadFile | None = None,
+    title: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    file: UploadFile = File(None),
     db: Session = Depends(get_db)
 ):
     try:
-        announcement = db.query(Announcement).filter(Announcement.id==id).first()
+        # Find the announcement
+        announcement = db.query(Announcement).filter(Announcement.id == id).first()
         if not announcement:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f'Announcement with id: {id} not found'
+            )
         
-        # Keep existing url_name if no new file
-        new_url_name = announcement.url_name
+        # Keep track of the old file path if it exists
+        old_file_path = None
+        if announcement.url_name:
+            old_file_path = os.path.join("uploads", announcement.url_name)
         
         # Handle file upload if provided
         if file:
-            # Delete old file if exists
-            if announcement.url_name:
-                old_file_path = os.path.join("uploads", announcement.url_name)
-                if os.path.exists(old_file_path):
-                    os.remove(old_file_path)
-            
-            # Create new file
+            # Create new file path
             file_extension = os.path.splitext(file.filename)[1]
-            file_name = f"{uuid.uuid4()}{file_extension}"
-            file_path = os.path.join("uploads", file_name)
+            new_file_name = f"{uuid.uuid4()}{file_extension}"
+            new_file_path = os.path.join("uploads", new_file_name)
             
             # Ensure uploads directory exists
             os.makedirs("uploads", exist_ok=True)
             
-            # Save the file
-            with open(file_path, "wb") as buffer:
-                content = file.file.read()
-                buffer.write(content)
-            
-            new_url_name = file_name
+            # Save the new file
+            try:
+                contents = await file.read()
+                with open(new_file_path, "wb") as f:
+                    f.write(contents)
+                
+                # Update announcement with new file info
+                announcement.url_name = new_file_name
+                
+                # Delete old file if it exists
+                if old_file_path and os.path.exists(old_file_path):
+                    try:
+                        os.remove(old_file_path)
+                    except OSError:
+                        print(f"Warning: Could not delete old file: {old_file_path}")
+            except Exception as e:
+                # If anything goes wrong with file handling, clean up
+                if os.path.exists(new_file_path):
+                    os.remove(new_file_path)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error handling file upload: {str(e)}"
+                )
         
         # Update announcement fields
         announcement.title = title
         announcement.content = description
-        announcement.url_name = new_url_name
         
+        # Commit changes
         db.commit()
-        return {"detail": "Announcement updated", "announcement": announcement}
+        db.refresh(announcement)
+        
+        # Return updated announcement
+        return {
+            "id": announcement.id,
+            "title": announcement.title,
+            "content": announcement.content,
+            "url_name": announcement.url_name,
+            "created_at": announcement.created_at,
+            "creator_id": announcement.creator_id
+        }
+        
+    except HTTPException as he:
+        raise he
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating announcement: {str(e)}"
+        )
 
 @app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
 def destroy(id: int, db: Session = Depends(get_db)):
@@ -1384,7 +1428,10 @@ def destroy(id: int, db: Session = Depends(get_db)):
         if announcement.url_name:
             file_path = os.path.join("uploads", announcement.url_name)
             if os.path.exists(file_path):
-                os.remove(file_path)
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    print(f"Error deleting file: {e}")  # Log error but continue with announcement deletion
         
         # Delete the announcement from database
         db.delete(announcement)
@@ -1395,18 +1442,6 @@ def destroy(id: int, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting announcement: {str(e)}")
 
-
-@app.get("/announcements", response_model=List[Show])
-def all(db: Session = Depends(get_db)):
-    blogs = db.query(Announcement).all()
-    return blogs
-
-@app.get("/announcements/{id}", status_code=200, response_model=Show)
-def show(id: int, db: Session = Depends(get_db)):
-    blog = db.query(Announcement).filter(Announcement.id == id).first()
-    if not blog:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'blog with {id} not found')
-    return blog
 
 @app.post("/quiz/create")
 def create_quiz():
