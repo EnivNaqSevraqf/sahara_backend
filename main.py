@@ -2147,8 +2147,6 @@ async def get_gradeable_table(
         results.append({
             "id": gradeable.id,
             "title": gradeable.title,
-            "description": gradeable.description,
-            "due_date": gradeable.due_date,
             "max_points": gradeable.max_points,
             "creator_id": gradeable.creator_id,
             "created_at": gradeable.created_at
