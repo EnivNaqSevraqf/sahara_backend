@@ -2419,7 +2419,6 @@ async def get_submittables(
                 "opens_at": s.opens_at,
                 "deadline": s.deadline,
                 "reference_files": [{
-                    "id": 1,  # Using a placeholder ID for now
                     "original_filename": s.original_filename
                 }] if s.file_url else [],
                 "submission_status": {
@@ -2495,11 +2494,11 @@ async def create_submittable(
     deadline: str = FastAPIForm(...),
     description: str = FastAPIForm(...),
     opens_at: Optional[str] = FastAPIForm(None),
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     token: str = Depends(prof_required)
 ):
-    """Create a new submittable with a reference file"""
+    """Create a new submittable with an optional reference file"""
     try:
         # Basic validation
         try:
@@ -2509,51 +2508,77 @@ async def create_submittable(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format")
         
-        # Get the creator (professor) from token
-        # Fix: Don't decode the token as it's already decoded by the dependency
-        # payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        payload = token  # The token is already decoded by prof_required dependency
-        username = payload.get("sub")
-        user = db.query(User).filter(User.username == username).first()
-        
-        if not user:
+        # Get current user
+        current_user = get_current_user_from_string(token, db)
+        if not current_user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Save the reference file
-        file_extension = file.filename.split('.')[-1]
-        file_name = f"ref_{uuid.uuid4()}.{file_extension}"
-        file_path = f"uploads/{file_name}"
-        
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        # Create submittable in database with file information
-        new_submittable = Submittable(
+        # Create submittable object
+        submittable = Submittable(
             title=title,
-            opens_at=opens_at,
             deadline=deadline,
             description=description,
-            creator_id=user.id,
-            file_url=f"uploads/{file_name}",  # URL path without leading slash
-            original_filename=file.filename
+            opens_at=opens_at,
+            creator_id=current_user.id,
+            file_url="",  # Default empty string
+            original_filename=""  # Default empty string
         )
-        
-        db.add(new_submittable)
+
+        # Handle file upload if provided
+        if file:
+            # Create uploads directory if it doesn't exist
+            upload_dir = "uploads"
+            if not os.path.exists(upload_dir):
+                os.makedirs(upload_dir)
+
+            # Generate unique filename
+            file_extension = os.path.splitext(file.filename)[1]
+            unique_filename = f"{uuid.uuid4()}{file_extension}"
+            file_path = os.path.join(upload_dir, unique_filename)
+
+            # Save file
+            with open(file_path, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
+
+            # Update submittable with file information
+            submittable.file_url = file_path
+            submittable.original_filename = file.filename
+
+        # Add to database
+        db.add(submittable)
         db.commit()
-        db.refresh(new_submittable)
-        
-        return JSONResponse(status_code=201, content={
-            "message": "Submittable created successfully",
-            "submittable_id": new_submittable.id
-        })
+        db.refresh(submittable)
+
+        # Return JSON response with proper structure
+        return JSONResponse(
+            status_code=201,
+            content={
+                "message": "Submittable created successfully",
+                "submittable": {
+                    "id": submittable.id,
+                    "title": submittable.title,
+                    "opens_at": submittable.opens_at,
+                    "deadline": submittable.deadline,
+                    "description": submittable.description,
+                    "created_at": submittable.created_at,
+                    "reference_files": [{
+                        "original_filename": submittable.original_filename
+                    }] if submittable.file_url else [],
+                    "submission_status": {
+                        "has_submitted": False,
+                        "submission_id": None,
+                        "submitted_on": None,
+                        "original_filename": None
+                    }
+                }
+            }
+        )
+
     except HTTPException as he:
-        if 'file_path' in locals() and os.path.exists(file_path):
-            os.remove(file_path)  # Clean up file if validation fails
         raise he
     except Exception as e:
         db.rollback()
-        if 'file_path' in locals() and os.path.exists(file_path):
-            os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error creating submittable: {str(e)}")
 
 @app.get("/submittables/{submittable_id}")
