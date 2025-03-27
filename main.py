@@ -2508,9 +2508,14 @@ async def create_submittable(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format")
         
-        # Get current user
-        current_user = get_current_user_from_string(token, db)
-        if not current_user:
+        # Get the creator (professor) from token
+        # Fix: Don't decode the token as it's already decoded by the dependency
+        # payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = token  # The token is already decoded by prof_required dependency
+        username = payload.get("sub")
+        user = db.query(User).filter(User.username == username).first()
+        
+        if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
         # Create submittable object
@@ -2519,7 +2524,7 @@ async def create_submittable(
             deadline=deadline,
             description=description,
             opens_at=opens_at,
-            creator_id=current_user.id,
+            creator_id=user.id,
             file_url="",  # Default empty string
             original_filename=""  # Default empty string
         )
