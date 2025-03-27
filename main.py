@@ -208,7 +208,7 @@ class Announcement(Base):
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     title = Column(String, nullable=False)
-    content = Column(String, nullable=False)  # Changed from JSONB to String
+    content = Column(String, nullable=False)  # Supports Markdown formatting for rich text
     url_name = Column(String, unique=True, nullable=True)
     
     @validates("creator_id")
@@ -1200,7 +1200,7 @@ class Show(BaseModel):
     creator_id: int
     created_at: str
     title: str
-    content: str
+    content: str  # Contains Markdown formatted text
     url_name: Optional[str] = None
 
     class Config:
@@ -1256,10 +1256,25 @@ async def download_announcement_file(
         if not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
         
+        # Determine content type based on file extension
+        file_extension = os.path.splitext(announcement.url_name)[1].lower()
+        content_type = {
+            '.pdf': 'application/pdf',
+            '.doc': 'application/msword',
+            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.txt': 'text/plain'
+        }.get(file_extension, 'application/octet-stream')
+        
         return FileResponse(
             file_path,
             filename=announcement.url_name,
-            media_type='application/octet-stream'
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{announcement.url_name}"'
+            }
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
