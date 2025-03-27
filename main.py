@@ -608,7 +608,6 @@ class FormCreateRequest(BaseModel):
 
 class FormResponseSubmit(BaseModel):
     form_id: int
-    user_id: int
     response_data: str  # JSON serialized response data
 
 class UserIdRequest(BaseModel):
@@ -919,6 +918,37 @@ def create_prof(
         "temporary_password": temporary_password
     }
 
+def extract_students(content: str) -> List[dict]:
+    """
+    Extracts student data from the CSV content.
+    Returns a list of dictionaries with student data.
+    """
+    reader = csv.DictReader(content.splitlines())
+    students = []
+    expected_headers = ['RollNo','Name', 'Email']
+    headers = reader.fieldnames
+
+    for header in expected_headers:
+        if header not in headers:
+            raise CSVFormatError(f"Missing header: {header}")
+    
+    for row in reader:
+        student = {
+            'RollNo': row.get('RollNo'),
+            'Name': row.get('Name'),
+            'Email': row.get('Email'),
+            
+        }
+        students.append(student)
+    
+
+    for student in students:
+        if not student['RollNo'] or not student['Name'] or not student['Email']:
+            print(student)
+            raise CSVFormatError("All fields must be filled for each student.")
+    
+    return students
+
 """
 CSV File Format for Student Upload:
 Expected columns:
@@ -955,10 +985,10 @@ async def upload_students(
     try:
         # Read file content
         content = await file.read()
-        content_str = content.decode('utf-16')
+        content_str = content.decode('utf-8')
         
         try:
-            students = extract_student_data_from_content(content_str)
+            students = extract_students(content_str)
         except CSVFormatError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -979,8 +1009,8 @@ async def upload_students(
         # Process each student
         for student in students:
             try:
-                username = student['Username']
-                
+                # extract username from email
+                username = student['Email'].split('@')[0]
                 # Check if username already exists
                 existing_user = db.query(User).filter(User.username == username).first()
                 if existing_user:
@@ -992,7 +1022,12 @@ async def upload_students(
                 hashed_password = create_hashed_password(temp_password)
                 
                 # Create new student
+                if 'RollNo' in student:
+                    user_id = student['RollNo']
+                else:
+                    user_id = None
                 new_student = User(
+                    id=user_id,
                     name=student['Name'],
                     email=student['Email'],
                     username=username,
@@ -1589,12 +1624,15 @@ def create_form_db(form_data: FormCreateRequest, db: Session) -> Dict[str, Any]:
         print(f"error creating form: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating form: {str(e)}")
 
-def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Dict[str, Any]:
+def store_form_response_db(response_data: FormResponseSubmit, 
+                            user_id: int,  # Current user information
+                           db: Session = Depends(get_db)):
     """
     Store a user's response to a form
     
     Parameters:
     - response_data: FormResponseSubmit object
+    - user_id: Current user information
     - db: Database session
     
     Returns:
@@ -1614,7 +1652,7 @@ def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Di
         # Check if user has already responded
         existing_response = db.query(FormResponse).filter(
             FormResponse.form_id == response_data.form_id,
-            FormResponse.user_id == response_data.user_id
+            FormResponse.user_id == user_id
         ).first()
         
         if existing_response:
@@ -1626,7 +1664,7 @@ def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Di
             # Add new response
             new_response = FormResponse(
                 form_id=response_data.form_id,
-                user_id=response_data.user_id,
+                user_id=user_id,
                 response_data=response_data.response_data,
                 submitted_at=datetime.now(timezone.utc).isoformat()
             )
@@ -1638,7 +1676,6 @@ def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Di
         return {
             "message": message,
             "form_id": response_data.form_id,
-            "user_id": response_data.user_id
         }
     except HTTPException as he:
         db.rollback()
@@ -1671,8 +1708,6 @@ def get_form_by_id_db(form_id: int, db: Session) -> Dict[str, Any]:
             "created_at": form.created_at,
             "deadline": form.deadline,
             "form_json": json.loads(form.form_json) if hasattr(form, "form_json") else None,
-            "target_type": form.target_type.value,
-            "target_id": form.target_id
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving form: {str(e)}")
@@ -1781,9 +1816,9 @@ async def api_create_form(form_data: FormCreateRequest, token: str = Depends(pro
     return JSONResponse(status_code=201, content=result)
 
 @app.post("/api/forms/submit")
-async def api_submit_response(form_response: FormResponseSubmit, db: Session = Depends(get_db)):
+async def api_submit_response(form_response: FormResponseSubmit, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Submit a response to a form"""
-    result = store_form_response_db(form_response, db)
+    result = store_form_response_db(form_response, user["user"].id, db)
     return JSONResponse(status_code=201, content=result)
 
 @app.get("/api/forms/{form_id}")
