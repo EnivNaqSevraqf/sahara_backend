@@ -31,63 +31,107 @@ def create_dummy_users():
         # Create dummy users
         dummy_users = [
             # Professors
-            {
-                "name": "Professor Smith",
-                "email": "smith@university.edu",
-                "username": "prof_smith",
-                "password": "prof123",
-                "role": RoleType.PROF,
-            },
-            {
-                "name": "Professor Johnson",
-                "email": "johnson@university.edu",
-                "username": "prof_johnson",
-                "password": "prof123",
-                "role": RoleType.PROF,
-            },
-            # TAs
-            {
-                "name": "TA Alice",
-                "email": "alice@university.edu",
-                "username": "ta_alice",
-                "password": "ta123",
-                "role": RoleType.TA,
-            },
-            {
-                "name": "TA Bob",
-                "email": "bob@university.edu",
-                "username": "ta_bob",
-                "password": "ta123",
-                "role": RoleType.TA,
-            },
+            
+            # {
+            #     "name": "Professor Smith",
+            #     "email": "smith@university.edu",
+            #     "username": "prof_smith",
+            #     "password": "prof123",
+            #     "role": RoleType.PROF,
+            # },
+            # {
+            #     "name": "Professor Johnson",
+            #     "email": "johnson@university.edu",
+            #     "username": "prof_johnson",
+            #     "password": "prof123",
+            #     "role": RoleType.PROF,
+            # },
+            # # TAs
+            # {
+            #     "name": "TA Alice",
+            #     "email": "alice@university.edu",
+            #     "username": "ta_alice",
+            #     "password": "ta123",
+            #     "role": RoleType.TA,
+            # },
+            # {
+            #     "name": "TA Bob",
+            #     "email": "bob@university.edu",
+            #     "username": "ta_bob",
+            #     "password": "ta123",
+            #     "role": RoleType.TA,
+            # },
+            
             # Students
             {
-                "name": "Student Carol",
-                "email": "carol@university.edu",
-                "username": "student_carol",
+                "name": "Student A",
+                "email": "a@university.edu",
+                "username": "student_a",
                 "password": "student123",
                 "role": RoleType.STUDENT,
             },
             {
-                "name": "Student Dave",
-                "email": "dave@university.edu",
-                "username": "student_dave",
+                "name": "Student B",
+                "email": "b@university.edu",
+                "username": "student_b",
                 "password": "student123",
                 "role": RoleType.STUDENT,
             },
             {
-                "name": "Student Eve",
-                "email": "eve@university.edu",
-                "username": "student_eve",
+                "name": "Student C",
+                "email": "c@university.edu",
+                "username": "student_c",
                 "password": "student123",
                 "role": RoleType.STUDENT,
             },
             {
-                "name": "Student Frank",
-                "email": "frank@university.edu",
-                "username": "student_frank",
+                "name": "Student D",
+                "email": "d@university.edu",
+                "username": "student_d",
                 "password": "student123",
                 "role": RoleType.STUDENT,
+            },
+            {
+                "name": "Student E",
+                "email": "e@university.edu",
+                "username": "student_e",
+                "password": "student123",
+                "role": RoleType.STUDENT,
+            },
+            {
+                "name": "Student F",
+                "email": "f@university.edu",
+                "username": "student_f",
+                "password": "student123",
+                "role": RoleType.STUDENT
+            },
+            {
+                "name": "Student G",
+                "email": "g@university.edu",
+                "username": "student_g",
+                "password": "student123",
+                "role": RoleType.STUDENT
+            },
+            {
+                "name": "Student K",
+                "email": "h@university.edu",
+                "username": "student_h",
+                "password": "student123",
+                "role": RoleType.STUDENT
+            },
+            {
+                "name": "Student I",
+                "email": "i@university.edu",
+                "username": "student_I",
+                "password": "student123",
+                "role": RoleType.STUDENT
+            },
+            {
+                "name": "Student J",
+                "email": "j@university.edu",
+                "username": "student_j",
+                "password": "student123",
+                "role": RoleType.STUDENT
             }
         ]
 
