@@ -3,7 +3,7 @@ import json
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, Form as FastAPIForm, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime
+from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, validates
 from sqlalchemy.dialects.postgresql import JSONB, insert
@@ -219,9 +219,10 @@ class Form(Base):
     @validates("target_type", "target_id")
     def validate_target(self, key, value):
         if self.target_type == RoleType.ROLE:
-            role = SessionLocal.query(Role).filter_by(id=self.target_id).first()
-            if role and role.name == RoleType.PROFESSOR:
-                raise ValueError("Forms cannot be assigned to Professors.")
+            with SessionLocal() as session:
+                role = session.query(Role).filter_by(id=self.target_id).first()
+                if role and role.name == RoleType.PROFESSOR:
+                    raise ValueError("Forms cannot be assigned to Professors.")
         return value
 
 team_members = Table(
@@ -288,8 +289,8 @@ class Gradeable(Base):
     __tablename__ = "gradeables"
     id = Column(Integer, primary_key=True)
     title = Column(String, nullable=False)
-    description = Column(String, nullable=False)
-    due_date = Column(String, nullable=False)
+    #description = Column(String, nullable=True)
+    #due_date = Column(String, nullable=False)
     max_points = Column(Integer, nullable=False)
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
@@ -299,10 +300,11 @@ class Gradeable(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role == RoleType.STUDENT:
-            raise ValueError("Students cannot create gradeables.")
-        return value
+        with SessionLocal() as session:
+            user = session.query(User).filter_by(id=value).first()
+            if user and user.role == RoleType.STUDENT:
+                raise ValueError("Students cannot create gradeables.")
+            return value
     
 class GradeableScores(Base):
     __tablename__ = "gradeable_scores"
@@ -310,7 +312,7 @@ class GradeableScores(Base):
     gradeable_id = Column(Integer, ForeignKey("gradeables.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     score = Column(Integer, nullable=False)
-    feedback = Column(String, nullable=True)
+    #feedback = Column(String, nullable=True)
 
     gradeable = relationship("Gradeable", back_populates="scores")
     user = relationship("User", back_populates="gradeable_scores")
@@ -349,10 +351,11 @@ class UserCalendarEvent(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role == RoleType.STUDENT:
-            raise ValueError("Students cannot create calendar events.")
-        return value
+        with SessionLocal() as session:
+            user = session.query(User).filter_by(id=value).first()
+            if user and user.role == RoleType.STUDENT:
+                raise ValueError("Students cannot create calendar events.")
+            return value
 
 class TeamCalendarEvent(Base):
     __tablename__ = "team_calendar_events"
@@ -368,10 +371,11 @@ class TeamCalendarEvent(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        user = SessionLocal.query(User).filter_by(id=value).first()
-        if user and user.role == RoleType.STUDENT:
-            raise ValueError("Students cannot create calendar events.")
-        return value
+        with SessionLocal() as session:
+            user = session.query(User).filter_by(id=value).first()
+            if user and user.role == RoleType.STUDENT:
+                raise ValueError("Students cannot create calendar events.")
+            return value
     
 class Team_TA(Base):
     __tablename__ = "team_tas"
@@ -402,6 +406,44 @@ class Message(Base):
 
     sender = relationship("User", back_populates="messages")
     channel = relationship("Channel", back_populates="messages")
+
+class TeamSkill(Base):
+    __tablename__ = "team_skills"
+
+class UserSkill(Base):
+    __tablename__ = "user_skills"
+    
+# First, add these models after your existing models
+
+class FeedbackSubmission(Base):
+    __tablename__ = "feedback_submissions"
+    id = Column(Integer, primary_key=True)
+    submitter_id = Column(Integer, ForeignKey("users.id"))
+    team_id = Column(Integer, ForeignKey("teams.id"))
+    submitted_at = Column(DateTime, default=datetime.now(timezone.utc))
+    submitter = relationship("User", foreign_keys=[submitter_id])
+    team = relationship("Team")
+    details = relationship("FeedbackDetail", back_populates="submission")
+
+class FeedbackDetail(Base):
+    __tablename__ = "feedback_details"
+    id = Column(Integer, primary_key=True)
+    submission_id = Column(Integer, ForeignKey("feedback_submissions.id"))
+    member_id = Column(Integer, ForeignKey("users.id"))
+    contribution = Column(Float)
+    remarks = Column(Text)
+    submission = relationship("FeedbackSubmission", back_populates="details")
+    member = relationship("User", foreign_keys=[member_id])
+
+# Add these Pydantic models for request validation
+class FeedbackDetailRequest(BaseModel):
+    member_id: int
+    contribution: float
+    remarks: str
+
+class FeedbackSubmissionRequest(BaseModel):
+    team_id: int
+    details: List[FeedbackDetailRequest]
 
 def get_db():
     db = SessionLocal()
@@ -597,25 +639,23 @@ class AssignTeamSkillsRequest(BaseModel):
     skill_ids: List[int]
 
 class GradeableCreateRequest(BaseModel):
-    title: str
-    description: str
-    due_date: str  # ISO 8601 format
-    max_points: int
+    title: str = FastAPIForm(...)
+    # max_points: str = FastAPIForm(...)
     
-    @validator('due_date')
-    def validate_due_date(cls, v):
-        try:
-            # Validate ISO 8601 format
-            datetime.fromisoformat(v.replace('Z', '+00:00'))
-            return v
-        except ValueError:
-            raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
+    # @validator('due_date')
+    # def validate_due_date(cls, v):
+    #     try:
+    #         # Validate ISO 8601 format
+    #         datetime.fromisoformat(v.replace('Z', '+00:00'))
+    #         return v
+    #     except ValueError:
+    #         raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
             
-    @validator('max_points')
-    def validate_max_points(cls, v):
-        if v <= 0:
-            raise ValueError("Maximum points must be greater than zero")
-        return v
+    # @validator('max_points')
+    # def validate_max_points(cls, v):
+    #     if v <= 0:
+    #         raise ValueError("Maximum points must be greater than zero")
+    #     return v
 
 app = FastAPI()
 
@@ -704,11 +744,6 @@ def resolve_token(token: str = Header(None)):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-def check_user_permitted(user_id: int, role: RoleType):
-    user = SessionLocal.query(User).filter_by(id=user_id).first()
-    if user.role.role != role:
-        raise HTTPException(status_code=403, detail="User does not have permission to access this resource")
-
 # Authentication dependencies
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
@@ -773,12 +808,11 @@ def prof_or_ta_required(token: str = Depends(oauth2_scheme), db: Session = Depen
         username = payload.get("sub")
         if not username:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
-            
+        
         # Check if user exists
         user = db.query(User).filter(User.username == username).first()
         if not user:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
-            
         # Check if user is a professor or TA
         role = db.query(Role).filter(Role.id == user.role_id).first()
         if role.role not in [RoleType.PROF, RoleType.TA]:
@@ -786,7 +820,6 @@ def prof_or_ta_required(token: str = Depends(oauth2_scheme), db: Session = Depen
                 status_code=status.HTTP_403_FORBIDDEN, 
                 detail="Not authorized, professor or TA access required"
             )
-            
         return payload
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
@@ -1170,99 +1203,226 @@ class Show(BaseModel):
 
 @app.post('/announcements', status_code=status.HTTP_201_CREATED)
 async def create(
-    title: Annotated[str, Form()],
-    description: Annotated[str, Form()],
-    file: UploadFile | None = None,  # Changed this line
-    db: Session = Depends(get_db),
-    #current_user: dict = Depends(get_current_user)
-):
-    try:
-        file_location = None
-        if file and file.filename:  # Only process if file exists and has filename
-            file_extension = file.filename.split('.')[-1]
-            file_name = f"{uuid.uuid4()}.{file_extension}"
-            file_location = f"uploads/{file_name}"
-            with open(file_location, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        new_announcement = Announcement(
-            creator_id=1,
-            created_at=current_time,
-            title=title,
-            content=description,
-            url_name=file_location
-        )
-        
-        db.add(new_announcement)
-        db.commit()
-        db.refresh(new_announcement)
-        
-        return new_announcement
-        
-    except Exception as e:
-        if file_location and os.path.exists(file_location):
-            os.remove(file_location)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-    
-
-@app.put('/announcements/{id}', status_code=status.HTTP_202_ACCEPTED)
-def update(
-    id: int,
-    title: Annotated[str, Form()],
-    description: Annotated[str, Form()],  # Now expects plain text
-    file: UploadFile | None = None,
+    title: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    file: UploadFile = File(None),
     db: Session = Depends(get_db)
 ):
-    announcement = db.query(Announcement).filter(Announcement.id==id)
-    if not announcement.first():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
-    
-    new_url_name = announcement.first().url_name
-    if file:
-        if announcement.first().url_name and os.path.exists(announcement.first().url_name):
-            os.remove(announcement.first().url_name)
+    saved_file_path = None
+    try:
+        # Create file path and url_name
+        url_name = None
+        if file:
+            # Create file path
+            file_extension = os.path.splitext(file.filename)[1]
+            file_name = f"{uuid.uuid4()}{file_extension}"
+            saved_file_path = os.path.join("uploads", file_name)
+            
+            # Ensure uploads directory exists
+            os.makedirs("uploads", exist_ok=True)
+            
+            # Save the file
+            with open(saved_file_path, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
+            
+            url_name = file_name
         
-        file_extension = file.filename.split('.')[-1]
-        file_name = f"{uuid.uuid4()}.{file_extension}"
-        new_url_name = f"uploads/{file_name}"
-        with open(new_url_name, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-    
-    # Update only the modifiable fields
-    announcement.first().title = title
-    announcement.first().content = description  # Store description directly as string
-    announcement.first().url_name = new_url_name
+        # Create announcement in database
+        db_announcement = Announcement(
+            title=title,
+            content=description,
+            url_name=url_name,
+            creator_id=1  # Default creator ID
+        )
+        db.add(db_announcement)
+        db.commit()
+        db.refresh(db_announcement)
+        
+        return db_announcement
+    except Exception as e:
+        db.rollback()
+        # Only delete the file if database operation failed
+        if saved_file_path and os.path.exists(saved_file_path):
+            try:
+                os.remove(saved_file_path)
+            except OSError:
+                pass  # Ignore file deletion errors during cleanup
+        raise HTTPException(status_code=500, detail=str(e))
 
-    db.commit()
-    db.refresh(announcement.first())
-    return {"detail": "Announcement updated", "announcement": announcement.first()}
-
-@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
-def destroy(id:int, db:Session=Depends(get_db)):
-    blog=db.query(Announcement).filter(Announcement.id==id)
-    if not blog.first():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
-    if blog.first().url_name and os.path.exists(blog.first().url_name):  # Changed from file_path to url_name
-        os.remove(blog.first().url_name)
-    blog.delete(synchronize_session=False)
-    db.commit()
-    return 'done'
-
+@app.get('/announcements/{id}/download')
+async def download_announcement_file(
+    id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == id).first()
+        if not announcement or not announcement.url_name:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        file_path = os.path.join("uploads", announcement.url_name)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return FileResponse(
+            file_path,
+            filename=announcement.url_name,
+            media_type='application/octet-stream'
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/announcements', response_model=List[Show])
-def all(db:Session = Depends(get_db)):
-    blogs = db.query(Announcement).all()
-    return blogs
+def all(db: Session = Depends(get_db)):
+    try:
+        announcements = db.query(Announcement).order_by(Announcement.created_at.desc()).all()
+        return announcements
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get('/announcements/{id}', status_code=200, response_model=Show)
-def show(id, response: Response, db:Session=Depends(get_db)):
-    blog = db.query(Announcement).filter(Announcement.id==id).first()
-    if not blog:
-        response.status_code=status.HTTP_404_NOT_FOUND
-        return {'details': f'blog with {id} not found'}
-    return blog
+def show(id: int, db: Session = Depends(get_db)):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == id).first()
+        if not announcement:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id {id} not found')
+        return announcement
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
+def destroy(id: int, db: Session = Depends(get_db)):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == id).first()
+        if not announcement:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
+        
+        # Delete the associated file if it exists
+        if announcement.url_name:
+            file_path = os.path.join("uploads", announcement.url_name)
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    print(f"Error deleting file: {e}")  # Log error but continue with announcement deletion
+        
+        # Delete the announcement from database
+        db.delete(announcement)
+        db.commit()
+        
+        return {'message': 'Announcement deleted successfully'}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting announcement: {str(e)}")
+
+@app.put('/announcements/{id}', status_code=status.HTTP_202_ACCEPTED)
+async def update(
+    id: int,
+    title: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    file: UploadFile = File(None),
+    db: Session = Depends(get_db)
+):
+    try:
+        # Find the announcement
+        announcement = db.query(Announcement).filter(Announcement.id == id).first()
+        if not announcement:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f'Announcement with id: {id} not found'
+            )
+        
+        # Keep track of the old file path if it exists
+        old_file_path = None
+        if announcement.url_name:
+            old_file_path = os.path.join("uploads", announcement.url_name)
+        
+        # Handle file upload if provided
+        if file:
+            # Create new file path
+            file_extension = os.path.splitext(file.filename)[1]
+            new_file_name = f"{uuid.uuid4()}{file_extension}"
+            new_file_path = os.path.join("uploads", new_file_name)
+            
+            # Ensure uploads directory exists
+            os.makedirs("uploads", exist_ok=True)
+            
+            # Save the new file
+            try:
+                contents = await file.read()
+                with open(new_file_path, "wb") as f:
+                    f.write(contents)
+                
+                # Update announcement with new file info
+                announcement.url_name = new_file_name
+                
+                # Delete old file if it exists
+                if old_file_path and os.path.exists(old_file_path):
+                    try:
+                        os.remove(old_file_path)
+                    except OSError:
+                        print(f"Warning: Could not delete old file: {old_file_path}")
+            except Exception as e:
+                # If anything goes wrong with file handling, clean up
+                if os.path.exists(new_file_path):
+                    os.remove(new_file_path)
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Error handling file upload: {str(e)}"
+                )
+        
+        # Update announcement fields
+        announcement.title = title
+        announcement.content = description
+        
+        # Commit changes
+        db.commit()
+        db.refresh(announcement)
+        
+        # Return updated announcement
+        return {
+            "id": announcement.id,
+            "title": announcement.title,
+            "content": announcement.content,
+            "url_name": announcement.url_name,
+            "created_at": announcement.created_at,
+            "creator_id": announcement.creator_id
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error updating announcement: {str(e)}"
+        )
+
+@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
+def destroy(id: int, db: Session = Depends(get_db)):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == id).first()
+        if not announcement:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
+        
+        # Delete the associated file if it exists
+        if announcement.url_name:
+            file_path = os.path.join("uploads", announcement.url_name)
+            if os.path.exists(file_path):
+                try:
+                    os.remove(file_path)
+                except OSError as e:
+                    print(f"Error deleting file: {e}")  # Log error but continue with announcement deletion
+        
+        # Delete the announcement from database
+        db.delete(announcement)
+        db.commit()
+        
+        return {'message': 'Announcement deleted successfully'}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting announcement: {str(e)}")
+
 
 @app.post("/quiz/create")
 def create_quiz():
@@ -1857,11 +2017,9 @@ async def get_gradeable_table(
     for gradeable in gradeables:
         results.append({
             "id": gradeable.id,
-            "name": gradeable.name,
-            "description": gradeable.description,
-            "due_date": gradeable.due_date,
-            "created_at": gradeable.created_at,
-            "updated_at": gradeable.updated_at
+            "title": gradeable.title,
+            "max_points": gradeable.max_points,
+            "creator_id": gradeable.creator_id,
         })
     return JSONResponse(status_code=200, content=results)
 
@@ -1880,12 +2038,89 @@ async def get_gradeable_by_id(
     
     return JSONResponse(status_code=200, content={
         "id": gradeable.id,
-        "name": gradeable.name,
-        "description": gradeable.description,
-        "due_date": gradeable.due_date,
-        "created_at": gradeable.created_at,
-        "updated_at": gradeable.updated_at
+        "title": gradeable.title,
     })
+
+def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, db: Session) -> List[Dict[str, Any]]:
+    """
+    Parse CSV content containing user scores.
+    Expected CSV format: username,score
+    First row should be headers.
+    
+    Parameters:
+    - csv_content: CSV file content as string
+    - gradeable_id: ID of the gradeable
+    - max_points: Maximum points possible
+    - db: Database session
+    
+    Returns:
+        List of dictionaries with user_id, gradeable_id and score
+    """
+    scores = []
+    processed_user_ids = set()
+    
+    try:
+        csv_file = StringIO(csv_content)
+        csv_reader = csv.DictReader(csv_file)
+        
+        # Verify required headers
+        # required_headers = {'username', 'score'}
+        # if not all(header in csv_reader.fieldnames for header in required_headers):
+        #     raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
+        
+        # Process each row in CSV
+        for row_num, row in enumerate(csv_reader, start=2):
+            try:
+                # Extract and validate username
+                username = row['username'].strip()
+                if not username:
+                    continue
+                
+                # Extract and validate score
+                try:
+                    score = int(row['score'])
+                    if score < 0 or score > max_points:
+                        raise ValueError(f"Score must be between 0 and {max_points}")
+                except ValueError:
+                    raise ValueError(f"Invalid score format in row {row_num}")
+                
+                # Get user ID from username
+                user = db.query(User).filter(User.username == username).first()
+                if not user:
+                    raise ValueError(f"User with username '{username}' not found")
+                print(user.id)
+                scores.append({
+                    'user_id': user.id,
+                    'gradeable_id': gradeable_id,
+                    'score': score
+                })
+                processed_user_ids.add(user.id)
+                
+            except ValueError as e:
+                print(f"Warning: Skipping row {row_num}: {str(e)}")
+                continue
+        
+        # Get student role ID
+        student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
+        if not student_role:
+            raise ValueError("Student role not found in database")
+        
+        # Add default score of 0 for students not in CSV
+        students = db.query(User).filter(User.role_id == student_role.id).all()
+        for student in students:
+            if student.id not in processed_user_ids:
+                scores.append({
+                    'user_id': student.id,
+                    'gradeable_id': gradeable_id,
+                    'score': 0
+                })
+        
+        return scores
+        
+    except csv.Error as e:
+        raise ValueError(f"Error parsing CSV file: {str(e)}")
+    except Exception as e:
+        raise ValueError(f"Unexpected error processing CSV: {str(e)}")
 @app.get("/gradeables/{gradeable_id}/scores")
 async def get_gradeable_submissions(
     gradeable_id: int,
@@ -1907,178 +2142,227 @@ async def get_gradeable_submissions(
         })
     return JSONResponse(status_code=200, content=results)
 
-@app.get("/gradeables/{gradeable_id}/upload-scores")
-async def upload_gradeable_scores(
-    gradeable_id: int,
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
-):
-    """
-    Upload scores for a specific gradeable
-    """
-    # Ensure the file is a CSV
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only CSV files are allowed"
-        )
+# @app.post("/gradeables/create")
+# async def create_gradeable(
+#     gradeable: GradeableCreateRequest,
+#     file: UploadFile = File(...),
+# )
+
+# @app.post("/gradeables/{gradeable_id}/upload-scores")
+# async def upload_gradeable_scores(
+#     gradeable_id: int,
+#     file: UploadFile = File(...),
+#     db: Session = Depends(get_db),
+#     token: str = Depends(prof_or_ta_required)
+# ):
+#     """
+#     Upload scores for a specific gradeable
+#     """
+#     # Ensure the file is a CSV
+#     if not file.filename.endswith('.csv'):
+#         raise HTTPException(
+#             status_code=status.HTTP_400_BAD_REQUEST,
+#             detail="Only CSV files are allowed"
+#         )
     
+#     try:
+#         # Validate gradeable exists and get max points
+#         gradeable = db.query(Gradeable).filter(Gradeable.id == gradeable_id).first()
+#         if not gradeable:
+#             raise HTTPException(
+#                 status_code=status.HTTP_404_NOT_FOUND,
+#                 detail="Gradeable not found"
+#             )
+        
+#         # Read and parse file content
+#         content = await file.read()
+#         content_str = content.decode('utf-8')
+        
+#         # Parse scores with detailed validation
+#         scores = parse_scores_from_csv(
+#             csv_content=content_str, 
+#             gradeable_id=gradeable_id, 
+#             max_points=gradeable.max_points,
+#             db=db
+#         )
+        
+#         # Bulk upsert scores
+#         for score_data in scores:
+#             existing_submission = db.query(GradeableScores).filter(
+#                 GradeableScores.gradeable_id == gradeable_id,
+#                 GradeableScores.user_id == score_data["user_id"]
+#             ).first()
+            
+#             if existing_submission:
+#                 existing_submission.score = score_data["score"]
+#             else:
+#                 new_submission = GradeableScores(
+#                     user_id=score_data["user_id"],
+#                     gradeable_id=gradeable_id,
+#                     score=score_data["score"]
+#                 )
+#                 db.add(new_submission)
+        
+#         db.commit()
+        
+#         return JSONResponse(status_code=200, content={
+#             "message": "Scores uploaded successfully",
+#             "gradeable_id": gradeable_id,
+#             "total_submissions": len(scores)
+#         })
+    
+#     except ValueError as ve:
+#         db.rollback()
+#         raise HTTPException(status_code=400, detail=str(ve))
+#     except Exception as e:
+#         db.rollback()
+#         raise HTTPException(status_code=500, detail=f"Unexpected error uploading scores: {str(e)}")
+        
+        
+
+@app.post("/gradeables/create")
+async def create_gradeable(
+    # gradeable: GradeableCreateRequest,
+    title: str = FastAPIForm(...),
+    max_points: str = FastAPIForm(...),
+    file: UploadFile = File(...), # CSV file,
+    user_data: User = Depends(prof_or_ta_required),
+    db: Session = Depends(get_db)
+):
+    """Create a new gradeable"""
+    username = user_data.get('sub')
+    user = db.query(User).filter(User.username == username).first()
+    print("2137")
     try:
-        # Read file content
+        print("Title is", title, "Max points is", max_points, "Creator ID is", user.id)
+        new_gradeable = Gradeable(
+            title=title,
+            max_points=int(max_points),
+            creator_id=user.id
+        )
+        
+        print("Hello")
+        db.add(new_gradeable)
+        db.commit()
+        db.refresh(new_gradeable)
+        print(new_gradeable.id)
+        print("HELLO")
+
+        # Read and parse file content
         content = await file.read()
         content_str = content.decode('utf-8')
-        
-        # Parse CSV content
-        scores = parse_scores_from_csv(content_str)
-        
-        # Update scores in the database
-        for score in scores:
-            submission = db.query(GradeableScores).filter(
+        scores = parse_scores_from_csv(
+            csv_content=content_str, 
+            gradeable_id=new_gradeable.id, 
+            max_points=new_gradeable.max_points,
+            db=db
+        )
+        gradeable_id = new_gradeable.id
+        for score_data in scores:
+            existing_submission = db.query(GradeableScores).filter(
                 GradeableScores.gradeable_id == gradeable_id,
-                GradeableScores.user_id == score["user_id"]
+                GradeableScores.user_id == score_data["user_id"]
             ).first()
             
-            if submission:
-                submission.score = score["score"]
-                submission.submitted_at = datetime.now(timezone.utc).isoformat()
+            if existing_submission:
+                existing_submission.score = score_data["score"]
             else:
                 new_submission = GradeableScores(
-                    user_id=score["user_id"],
+                    user_id=score_data["user_id"],
                     gradeable_id=gradeable_id,
-                    score=score["score"],
-                    submitted_at=datetime.now(timezone.utc).isoformat()
+                    score=score_data["score"]
                 )
                 db.add(new_submission)
         
         db.commit()
         
-        return JSONResponse(status_code=200, content={
-            "message": "Scores uploaded successfully",
-            "gradeable_id": gradeable_id,
-            "total_submissions": len(scores)
-        })
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error uploading scores: {str(e)}")
-
-@app.post("/gradeables/create")
-async def create_gradeable(
-    gradeable: GradeableCreateRequest,
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
-):
-    """
-    Create a new gradeable
-    """
-    try:
-        # Extract the token payload to get the creator ID (username)
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        user = db.query(User).filter(User.username == username).first()
-        
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Check if a gradeable with the same title already exists
-        existing_gradeable = db.query(Gradeable).filter(Gradeable.title == gradeable.title).first()
-        if existing_gradeable:
-            raise HTTPException(status_code=400, detail="Gradeable with this title already exists")
-        
-        # Create new gradeable
-        new_gradeable = Gradeable(
-            title=gradeable.title,
-            description=gradeable.description,
-            due_date=gradeable.due_date,
-            max_points=gradeable.max_points,
-            creator_id=user.id,
-            created_at=datetime.now(timezone.utc).isoformat()
-        )
-        
-        db.add(new_gradeable)
-        db.commit()
-        db.refresh(new_gradeable)
-        
         return JSONResponse(status_code=201, content={
             "id": new_gradeable.id,
             "title": new_gradeable.title,
-            "description": new_gradeable.description,
-            "due_date": new_gradeable.due_date,
-            "max_points": new_gradeable.max_points,
+            "max_points": int(new_gradeable.max_points),
             "creator_id": new_gradeable.creator_id,
-            "created_at": new_gradeable.created_at
         })
-    except HTTPException as he:
-        raise he
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error creating gradeable: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error creating gradeable: {str(e)}"
+        )
 
-def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
-    """
-    Parse CSV content containing user scores.
-    Expected CSV format: user_id,score
-    First row should be headers.
+
+# def parse_scores_from_csv(csv_content: str, 
+#     gradeable_id: int, 
+#     max_points: int,
+#     db: Session) -> List[Dict[str, Any]]:
+#     """
+#     Parse CSV content containing user scores.
+#     Expected CSV format: user_id,score
+#     First row should be headers.
     
-    Also assigns a default score of 0 to any student who doesn't have a score in the CSV.
+#     Also assigns a default score of 0 to any student who doesn't have a score in the CSV.
     
-    Returns:
-        List of dictionaries with user_id and score
-    """
-    # import csv
-    # from io import StringIO
+#     Returns:
+#         List of dictionaries with user_id and score
+#     """
+#     # import csv
+#     # from io import StringIO
     
-    scores = []
-    processed_user_ids = set()
+#     scores = []
+#     processed_usernames = set()
     
-    # Parse the CSV content
-    try:
-        csv_file = StringIO(csv_content)
-        csv_reader = csv.DictReader(csv_file)
+#     # Parse the CSV content
+#     try:
+#         csv_file = StringIO(csv_content)
+#         csv_reader = csv.DictReader(csv_file)
         
-        # Check required headers
-        required_headers = ['user_id', 'score']
-        headers = csv_reader.fieldnames
-        
-        if not all(header in headers for header in required_headers):
-            raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
-        
-        # Process each row
-        for row in csv_reader:
-            try:
-                user_id = int(row['user_id'])
-                score = int(row['score'])
+#         # Check required headers
+#         required_headers = ['id','username', 'score']
+#         headers = csv_reader.fieldnames
+#         print("headers are", headers)
+#         # if not all(header in headers for header in required_headers):
+#         #     print(f"Warning: Extra headers found: {headers}. Proceeding with parsing.")
+#         #     raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
+#         print("line")
+#         # Process each row
+#         for row_num, row in enumerate(csv_reader, start=2):
+#             print("hihfi")
+#             print("Row is", row)
+#             try:
+#                 username = row['username'].strip()
+#                 score = int(row['score'])
                 
-                scores.append({
-                    'user_id': user_id,
-                    'score': score
-                })
-                processed_user_ids.add(user_id)
-            except (ValueError, KeyError) as e:
-                # Skip invalid rows but continue processing
-                print(f"Error processing row: {row}. Error: {str(e)}")
-                continue
+#                 user = db.query(User).filter(User.username == username).first()
+#                 if not user:
+#                     raise ValueError(f"User with username '{username}' not found on row {row_num}")
+
+#                 print("User ID is", user_id, "Score is", score)
+#                 scores.append({
+#                     'user_id': user_id,
+#                     'score': score
+#                 })
+#                 processed_usernames.add(username)
+#             except (ValueError, KeyError) as e:
+#                 # Skip invalid rows but continue processing
+#                 print(f"Error processing row: {row}. Error: {str(e)}")
+#                 continue
     
-    except Exception as e:
-        raise ValueError(f"Error parsing CSV: {str(e)}")
+#     except Exception as e:
+#         raise ValueError(f"Error parsing CSV: {str(e)}")
     
-    # Get all students from the database and add default score of 0 for missing ones
-    with SessionLocal() as db:
-        # Get student role ID
-        student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
-        if student_role:
-            # Get all student users
-            students = db.query(User).filter(User.role_id == student_role.id).all()
-            
-            # Add default score of 0 for students not in the CSV
-            for student in students:
-                if student.id not in processed_user_ids:
-                    scores.append({
-                        'user_id': student.id,
-                        'score': 0
-                    })
+#     # Get all students from the database and add default score of 0 for missing ones
+#         # Get student role ID
+#     student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
+#     if student_role:
+#         students = db.query(User).filter(User.role_id == student_role.id).all()
+        
+#         for student in students:
+#             if student.id not in processed_user_ids:
+#                 scores.append({
+#                     'user_id': student.id,
+#                     'score': 0
+#                 })
     
-    return scores
+#     return scores
 
 @app.get("/gradeables/{gradeable_id}/upload-scores")
 async def upload_gradeable_scores(
@@ -2442,7 +2726,7 @@ async def create_submittable(
             deadline=deadline,
             description=description,
             creator_id=user.id,
-            file_url=f"/uploads/{file_name}",  # URL path
+            file_url=f"uploads/{file_name}",  # URL path without leading slash
             original_filename=file.filename
         )
         
@@ -2610,7 +2894,7 @@ async def update_submittable(
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
             
-            existing_submittable.file_url = f"/uploads/{file_name}"
+            existing_submittable.file_url = f"uploads/{file_name}"
             existing_submittable.original_filename = file.filename
         
         db.commit()
@@ -2662,7 +2946,302 @@ async def delete_submission(
         raise he
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error deleting submission: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/feedback/students")
+async def get_student_feedback_info(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get student's team and member data with feedback submission validation"""
+    try:
+        user = current_user["user"]
+        
+        # Check if user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only students can access this endpoint"
+            )
+
+        # Check if user has been assigned to a team
+        if not user.teams:
+            raise HTTPException(
+                status_code=404,
+                detail="You have not been assigned to a team"
+            )
+            
+        team = user.teams[0]  # Get the student's team
+
+        # Get all team members including the current user
+        team_members = [
+            {
+                "id": member.id,
+                "name": member.name,
+                "is_current_user": member.id == user.id
+            }
+            for member in team.members
+        ]
+
+        if len(team_members) <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="No team members found to provide feedback for"
+            )
+
+        # Check if user has already submitted feedback
+        existing_submission = db.query(FeedbackSubmission).filter(
+            FeedbackSubmission.submitter_id == user.id,
+            FeedbackSubmission.team_id == team.id
+        ).first()
+
+        # If there's an existing submission, include the feedback details
+        submitted_feedback = None
+        if existing_submission:
+            feedback_details = db.query(FeedbackDetail).filter(
+                FeedbackDetail.submission_id == existing_submission.id
+            ).all()
+            
+            submitted_feedback = {
+                "submission_id": existing_submission.id,
+                "submitted_at": existing_submission.submitted_at.isoformat(),
+                "details": [
+                    {
+                        "member_id": detail.member_id,
+                        "contribution": detail.contribution,
+                        "remarks": detail.remarks
+                    }
+                    for detail in feedback_details
+                ]
+            }
+
+        return {
+            "team_id": team.id,
+            "team_name": team.name,
+            "members": team_members,
+            "submitted_feedback": submitted_feedback
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/feedback/student/submit")
+async def submit_student_feedback(
+    feedback: FeedbackSubmissionRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Submit feedback for team members"""
+    try:
+        user = current_user["user"]
+        
+        # Check if user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only students can submit feedback"
+            )
+
+        # Check if user belongs to the team they're submitting feedback for
+        if not any(team.id == feedback.team_id for team in user.teams):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only submit feedback for your own team"
+            )
+
+        # Check if user has already submitted feedback
+        existing_submission = db.query(FeedbackSubmission).filter(
+            FeedbackSubmission.submitter_id == user.id,
+            FeedbackSubmission.team_id == feedback.team_id
+        ).first()
+
+        if existing_submission:
+            raise HTTPException(
+                status_code=400,
+                detail="You have already submitted feedback for this team"
+            )
+
+        # Validate that all team members are being rated (except the submitter)
+        team = next(team for team in user.teams if team.id == feedback.team_id)
+        expected_member_count = len(team.members)  # Exclude the submitter
+        if len(feedback.details) != expected_member_count:
+            raise HTTPException(
+                status_code=400,
+                detail="Feedback must be provided for all team members"
+            )
+
+        # Validate that the rated members are actually in the team
+        team_member_ids = {member.id for member in team.members}
+        submitted_member_ids = {detail.member_id for detail in feedback.details}
+        if team_member_ids != submitted_member_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Feedback can only be provided for current team members"
+            )
+
+        # Validate total contribution equals 100%
+        total_contribution = sum(detail.contribution for detail in feedback.details)
+        if total_contribution != 100:
+            raise HTTPException(
+                status_code=400,
+                detail="Total contribution must equal 100%"
+            )
+
+        # Create feedback submission
+        new_submission = FeedbackSubmission(
+            submitter_id=user.id,
+            team_id=feedback.team_id,
+            submitted_at=datetime.now(timezone.utc)
+        )
+        db.add(new_submission)
+        db.flush()  # Get the ID before committing
+
+        # Create feedback details
+        for detail in feedback.details:
+            new_detail = FeedbackDetail(
+                submission_id=new_submission.id,
+                member_id=detail.member_id,
+                contribution=detail.contribution,
+                remarks=detail.remarks
+            )
+            db.add(new_detail)
+
+        db.commit()
+        return {"message": "Feedback submitted successfully"}
+    except HTTPException as he:
+        db.rollback()
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/feedback/admin")
+async def get_admin_feedback(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all teams that have at least one feedback submission"""
+    try:
+        # Check if user is an admin (TA or professor)
+        if current_user["role"] not in [RoleType.TA, RoleType.PROF]:
+            raise HTTPException(
+                status_code=403,
+                detail="Only teaching assistants and professors can access this endpoint"
+            )
+
+        # Get all teams that have feedback submissions
+        teams_with_feedback = (
+            db.query(Team)
+            .join(FeedbackSubmission, Team.id == FeedbackSubmission.team_id)
+            .distinct()
+            .all()
+        )
+
+        result = []
+        for team in teams_with_feedback:
+            # Get submission count for this team
+            submission_count = (
+                db.query(FeedbackSubmission)
+                .filter(FeedbackSubmission.team_id == team.id)
+                .count()
+            )
+
+            result.append({
+                "team_id": team.id,
+                "team_name": team.name,
+                "member_count": len(team.members),
+                "submission_count": submission_count,
+                "last_submission": db.query(FeedbackSubmission)
+                    .filter(FeedbackSubmission.team_id == team.id)
+                    .order_by(FeedbackSubmission.submitted_at.desc())
+                    .first()
+                    .submitted_at.isoformat()
+            })
+
+        return result
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/feedback/admin/view/{team_id}")
+async def get_team_feedback_details(
+    team_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get detailed feedback submissions for a specific team"""
+    try:
+        # Check if user is an admin (TA or professor)
+        if current_user["role"] not in [RoleType.TA, RoleType.PROF]:
+            raise HTTPException(
+                status_code=403,
+                detail="Only teaching assistants and professors can access this endpoint"
+            )
+
+        # Check if team exists
+        team = db.query(Team).filter(Team.id == team_id).first()
+        if not team:
+            raise HTTPException(status_code=404, detail="Team not found")
+
+        # Get all feedback submissions for this team
+        submissions = (
+            db.query(FeedbackSubmission)
+            .filter(FeedbackSubmission.team_id == team_id)
+            .all()
+        )
+
+        # Get all team members for reference
+        team_members = {
+            member.id: member.name 
+            for member in team.members
+        }
+
+        # Format the submissions with detailed information
+        formatted_submissions = []
+        for submission in submissions:
+            # Get details for this submission
+            feedback_details = (
+                db.query(FeedbackDetail)
+                .filter(FeedbackDetail.submission_id == submission.id)
+                .all()
+            )
+
+            # Get submitter info
+            submitter = db.query(User).filter(User.id == submission.submitter_id).first()
+
+            formatted_submissions.append({
+                "submission_id": submission.id,
+                "submitter": {
+                    "id": submitter.id,
+                    "name": submitter.name
+                },
+                "submitted_at": submission.submitted_at.isoformat(),
+                "feedback": [
+                    {
+                        "member_id": detail.member_id,
+                        "member_name": team_members.get(detail.member_id, "Unknown"),
+                        "contribution": detail.contribution,
+                        "remarks": detail.remarks
+                    }
+                    for detail in feedback_details
+                ]
+            })
+
+        return {
+            "team_id": team.id,
+            "team_name": team.name,
+            "members": team_members,
+            "submissions": formatted_submissions
+        }
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 ##Chatting Routes
 
@@ -2971,3 +3550,47 @@ async def websocket_endpoint(
             data = await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket, channel_id)
+
+@app.get("/discussions/download/{file_name}")
+async def download_file(
+    file_name: str,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Download a file and return it as base64 encoded data"""
+    try:
+        # Get the file record from the database
+        file_record = db.query(Message).filter(Message.file_name == file_name).first()
+        if not file_record:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Check if the user has access to the file
+        user = current_user["user"]
+        if not validate_channel_access(user, file_record.channel_id, db):
+            raise HTTPException(status_code=403, detail="Not authorized to download this file")
+        # Check if the file is a reference file
+        if file_record.message_type != 'file':
+            raise HTTPException(status_code=400, detail="Not a reference file")
+        
+        # Convert URL path to local path
+        local_path = file_record.file_name.lstrip('/')
+        local_path = os.path.join("forums_uploads", local_path)
+        # Check if the file exists locally
+        if not os.path.exists(local_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Read the file and encode it in base64
+        with open(local_path, "rb") as file:
+            file_data = file.read()
+            encoded_file_data = base64.b64encode(file_data).decode('utf-8')
+        
+        return JSONResponse(status_code=200, content={
+            "file_id": file_record.id,
+            "original_filename": file_record.file_name,
+            "file_data": encoded_file_data
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+
