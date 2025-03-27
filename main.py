@@ -2157,7 +2157,7 @@ async def get_gradeable_table(
 async def get_gradeable_by_id(
     gradeable_id: int,
     db: Session = Depends(get_db),
-    # token: str = Depends(prof_or_ta_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """
     Get a specific gradeable by ID
