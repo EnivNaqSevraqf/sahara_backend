@@ -2137,7 +2137,7 @@ async def get_gradeable_submissions(
             "id": submission.id,
             "user_id": submission.user_id,
             "gradeable_id": submission.gradeable_id,
-            "submitted_at": submission.submitted_at,
+            #"submitted_at": submission.submitted_at,
             "score": submission.score
         })
     return JSONResponse(status_code=200, content=results)
