@@ -2077,6 +2077,8 @@ async def get_gradeable_submissions(
     for submission in submissions:
         results.append({
             "id": submission.id,
+            "user_id": submission.user_id,
+            "name": submission.user.name,
             "gradeable_id": submission.gradeable_id,
             "user_id": submission.user_id, 
             "name": submission.user.name,
