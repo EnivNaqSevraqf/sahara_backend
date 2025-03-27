@@ -35,6 +35,10 @@ from fastapi.staticfiles import StaticFiles
 from typing import ForwardRef
 import base64
 import pandas as pd
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formatdate
 # Create uploads directory if it doesn't exist
 os.makedirs("uploads", exist_ok=True)
 
@@ -106,6 +110,7 @@ class Submittable(Base):
     file_url = Column(String, nullable=False)  # URL path to the reference file
     original_filename = Column(String, nullable=False)
     max_score = Column(Integer, nullable=False)  # Maximum possible score for this submittable
+
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     creator = relationship("User", back_populates="submittables")
@@ -189,10 +194,9 @@ class Form(Base):
     @validates("target_type", "target_id")
     def validate_target(self, key, value):
         if self.target_type == RoleType.ROLE:
-            with SessionLocal() as session:
-                role = session.query(Role).filter_by(id=self.target_id).first()
-                if role and role.name == RoleType.PROFESSOR:
-                    raise ValueError("Forms cannot be assigned to Professors.")
+            role = SessionLocal.query(Role).filter_by(id=self.target_id).first()
+            if role and role.name == RoleType.PROFESSOR:
+                raise ValueError("Forms cannot be assigned to Professors.")
         return value
 
 team_members = Table(
@@ -208,6 +212,7 @@ class Announcement(Base):
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     title = Column(String, nullable=False)
+
     content = Column(String, nullable=False)  # Supports Markdown formatting for rich text
     url_name = Column(String, unique=True, nullable=True)
     
@@ -237,8 +242,8 @@ class Gradeable(Base):
     __tablename__ = "gradeables"
     id = Column(Integer, primary_key=True)
     title = Column(String, nullable=False)
-    #description = Column(String, nullable=True)
-    #due_date = Column(String, nullable=False)
+    description = Column(String, nullable=False)
+    due_date = Column(String, nullable=False)
     max_points = Column(Integer, nullable=False)
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
@@ -248,11 +253,10 @@ class Gradeable(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        with SessionLocal() as session:
-            user = session.query(User).filter_by(id=value).first()
-            if user and user.role == RoleType.STUDENT:
-                raise ValueError("Students cannot create gradeables.")
-            return value
+        user = SessionLocal.query(User).filter_by(id=value).first()
+        if user and user.role == RoleType.STUDENT:
+            raise ValueError("Students cannot create gradeables.")
+        return value
     
 class GradeableScores(Base):
     __tablename__ = "gradeable_scores"
@@ -260,7 +264,7 @@ class GradeableScores(Base):
     gradeable_id = Column(Integer, ForeignKey("gradeables.id"), nullable=False)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     score = Column(Integer, nullable=False)
-    #feedback = Column(String, nullable=True)
+    feedback = Column(String, nullable=True)
 
     gradeable = relationship("Gradeable", back_populates="scores")
     user = relationship("User", back_populates="gradeable_scores")
@@ -299,11 +303,10 @@ class UserCalendarEvent(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        with SessionLocal() as session:
-            user = session.query(User).filter_by(id=value).first()
-            if user and user.role == RoleType.STUDENT:
-                raise ValueError("Students cannot create calendar events.")
-            return value
+        user = SessionLocal.query(User).filter_by(id=value).first()
+        if user and user.role == RoleType.STUDENT:
+            raise ValueError("Students cannot create calendar events.")
+        return value
 
 class TeamCalendarEvent(Base):
     __tablename__ = "team_calendar_events"
@@ -319,11 +322,10 @@ class TeamCalendarEvent(Base):
 
     @validates("creator_id")
     def validate_creator(self, key, value):
-        with SessionLocal() as session:
-            user = session.query(User).filter_by(id=value).first()
-            if user and user.role == RoleType.STUDENT:
-                raise ValueError("Students cannot create calendar events.")
-            return value
+        user = SessionLocal.query(User).filter_by(id=value).first()
+        if user and user.role == RoleType.STUDENT:
+            raise ValueError("Students cannot create calendar events.")
+        return value
     
 class Team_TA(Base):
     __tablename__ = "team_tas"
@@ -360,6 +362,17 @@ class TeamSkill(Base):
 
 class UserSkill(Base):
     __tablename__ = "user_skills"
+# Define OTP database table
+class UserOTP(Base):
+    __tablename__ = "user_otps"
+    
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    hashed_otp = Column(String, nullable=False)
+    expires_at = Column(String, nullable=False)  # ISO 8601 format
+    
+    # Relationship with User
+    user = relationship("User", backref="otp_record")
+
 
 def get_db():
     db = SessionLocal()
@@ -566,14 +579,14 @@ class GradeableCreateRequest(BaseModel):
     #due_date: str  # ISO 8601 format
     max_points: int
     
-    # @validator('due_date')
-    # def validate_due_date(cls, v):
-    #     try:
-    #         # Validate ISO 8601 format
-    #         datetime.fromisoformat(v.replace('Z', '+00:00'))
-    #         return v
-    #     except ValueError:
-    #         raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
+    @validator('due_date')
+    def validate_due_date(cls, v):
+        try:
+            # Validate ISO 8601 format
+            datetime.fromisoformat(v.replace('Z', '+00:00'))
+            return v
+        except ValueError:
+            raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
             
     @validator('max_points')
     def validate_max_points(cls, v):
@@ -703,6 +716,11 @@ def resolve_token(token: str = Header(None)):
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
+def check_user_permitted(user_id: int, role: RoleType):
+    user = SessionLocal.query(User).filter_by(id=user_id).first()
+    if user.role.role != role:
+        raise HTTPException(status_code=403, detail="User does not have permission to access this resource")
+
 # Authentication dependencies
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
 
@@ -790,11 +808,12 @@ def prof_or_ta_required(token: str = Depends(oauth2_scheme), db: Session = Depen
         username = payload.get("sub")
         if not username:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
-        
+            
         # Check if user exists
         user = db.query(User).filter(User.username == username).first()
         if not user:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User not found")
+            
         # Check if user is a professor or TA
         role = db.query(Role).filter(Role.id == user.role_id).first()
         if role.role not in [RoleType.PROF, RoleType.TA]:
@@ -802,6 +821,7 @@ def prof_or_ta_required(token: str = Depends(oauth2_scheme), db: Session = Depen
                 status_code=status.HTTP_403_FORBIDDEN, 
                 detail="Not authorized, professor or TA access required"
             )
+            
         return payload
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized")
@@ -1227,16 +1247,21 @@ async def create(
             content = await file.read()
             buffer.write(content)
         
-        # Create announcement in database
-        db_announcement = Announcement(
+        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Create new announcement
+        new_announcement = Announcement(
+            creator_id=1,
+            created_at=current_time,
             title=title,
             content=description,
             url_name=file_name,
             creator_id=1  # Default creator ID
         )
-        db.add(db_announcement)
+        
+        db.add(new_announcement)
         db.commit()
-        db.refresh(db_announcement)
+        db.refresh(new_announcement)
         
         return db_announcement
     except Exception as e:
@@ -1277,7 +1302,10 @@ async def download_announcement_file(
             }
         )
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        if file_location and os.path.exists(file_location):
+            os.remove(file_location)  # Clean up file if something went wrong
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
 
 @app.get('/announcements', response_model=List[Show])
 def all(db: Session = Depends(get_db)):
@@ -1348,6 +1376,18 @@ def destroy(id:int, db:Session=Depends(get_db)):
     db.commit()
     return 'done'
 
+@app.get('/announcements', response_model=List[Show])
+def all(db:Session = Depends(get_db)):
+    blogs = db.query(Announcement).all()
+    return blogs
+
+@app.get('/announcements/{id}', status_code=200, response_model=Show)
+def show(id, response: Response, db:Session=Depends(get_db)):
+    blog = db.query(Announcement).filter(Announcement.id==id).first()
+    if not blog:
+        response.status_code=status.HTTP_404_NOT_FOUND
+        return {'details': f'blog with {id} not found'}
+    return blog
 
 @app.get('/announcements', response_model=List[Show])
 def all(db:Session = Depends(get_db)):
@@ -2063,7 +2103,7 @@ def setbetaTestPairs(db: Session = Depends(get_db)):
 @app.get("/gradeables/")
 async def get_gradeable_table(
     db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
+    #token: str = Depends(prof_or_ta_required)
 ):
     """
     Get the gradeable table for professors and TAs
@@ -2074,8 +2114,11 @@ async def get_gradeable_table(
         results.append({
             "id": gradeable.id,
             "title": gradeable.title,
+            "description": gradeable.description,
+            "due_date": gradeable.due_date,
             "max_points": gradeable.max_points,
             "creator_id": gradeable.creator_id,
+            "created_at": gradeable.created_at
         })
     return JSONResponse(status_code=200, content=results)
 
@@ -2083,7 +2126,7 @@ async def get_gradeable_table(
 async def get_gradeable_by_id(
     gradeable_id: int,
     db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
+    # token: str = Depends(prof_or_ta_required)
 ):
     """
     Get a specific gradeable by ID
@@ -2096,11 +2139,12 @@ async def get_gradeable_by_id(
         "id": gradeable.id,
         "title": gradeable.title,
     })
+
 @app.get("/gradeables/{gradeable_id}/scores")
 async def get_gradeable_submissions(
     gradeable_id: int,
     db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
+    # token: str = Depends(prof_or_ta_required)
 ):
     """
     Get all submissions for a specific gradeable
@@ -2119,6 +2163,7 @@ async def get_gradeable_submissions(
             "score": submission.score
         })
     return JSONResponse(status_code=200, content=results)
+
 
 @app.post("/gradeables/{gradeable_id}/upload-scores")
 async def upload_gradeable_scores(
@@ -2306,6 +2351,137 @@ def parse_scores_from_csv(csv_content: str,
     return scores
 
 
+@app.post("/gradeables/create")
+async def create_gradeable(
+    gradeable: GradeableCreateRequest,
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """
+    Create a new gradeable
+    """
+    try:
+        # Extract the token payload to get the creator ID (username)
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        user = db.query(User).filter(User.username == username).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        # Check if a gradeable with the same title already exists
+        existing_gradeable = db.query(Gradeable).filter(Gradeable.title == gradeable.title).first()
+        if existing_gradeable:
+            raise HTTPException(status_code=400, detail="Gradeable with this title already exists")
+        
+        # Create new gradeable
+        new_gradeable = Gradeable(
+            title=gradeable.title,
+            description=gradeable.description,
+            due_date=gradeable.due_date,
+            max_points=gradeable.max_points,
+            creator_id=user.id,
+            created_at=datetime.now(timezone.utc).isoformat()
+        )
+        
+        db.add(new_gradeable)
+        db.commit()
+        db.refresh(new_gradeable)
+        
+        return JSONResponse(status_code=201, content={
+            "id": new_gradeable.id,
+            "title": new_gradeable.title,
+            "description": new_gradeable.description,
+            "due_date": new_gradeable.due_date,
+            "max_points": new_gradeable.max_points,
+            "creator_id": new_gradeable.creator_id,
+            "created_at": new_gradeable.created_at
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating gradeable: {str(e)}")
+
+def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
+    """
+    Parse CSV content containing user scores.
+    Expected CSV format: user_id,score
+    First row should be headers.
+    
+    Also assigns a default score of 0 to any student who doesn't have a score in the CSV.
+    
+    Returns:
+        List of dictionaries with user_id and score
+    """
+    # import csv
+    # from io import StringIO
+    
+    scores = []
+    processed_user_ids = set()
+    
+    # Parse the CSV content
+    try:
+        csv_file = StringIO(csv_content)
+        csv_reader = csv.DictReader(csv_file)
+        
+        # Check required headers
+        required_headers = ['user_id', 'score']
+        headers = csv_reader.fieldnames
+        
+        if not all(header in headers for header in required_headers):
+            raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
+        
+        # Process each row
+        for row in csv_reader:
+            try:
+                user_id = int(row['user_id'])
+                score = int(row['score'])
+                
+                scores.append({
+                    'user_id': user_id,
+                    'score': score
+                })
+                processed_user_ids.add(user_id)
+            except (ValueError, KeyError) as e:
+                # Skip invalid rows but continue processing
+                print(f"Error processing row: {row}. Error: {str(e)}")
+                continue
+    
+    except Exception as e:
+        raise ValueError(f"Error parsing CSV: {str(e)}")
+    
+    # Get all students from the database and add default score of 0 for missing ones
+    with SessionLocal() as db:
+        # Get student role ID
+        student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
+        if student_role:
+            # Get all student users
+            students = db.query(User).filter(User.role_id == student_role.id).all()
+            
+            # Add default score of 0 for students not in the CSV
+            for student in students:
+                if student.id not in processed_user_ids:
+                    scores.append({
+                        'user_id': student.id,
+                        'score': 0
+                    })
+    
+    return scores
+
+# __________________________________
+#           Submittables
+# __________________________________
+
+@app.post("/submittables/{submittable_id}/submit")
+async def submit_file(
+    submittable_id: int,
+    file: UploadFile = File(...),  # Now accepts a single file
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+
 # submittables start here 
 # this is to submit file for a submittable, done by students
 @app.post("/submittables/{submittable_id}/submit")
@@ -2313,7 +2489,7 @@ async def submit_file(
     submittable_id: int,
     file: UploadFile = File(...),  # Now accepts a single file
     db: Session = Depends(get_db),
-    current_user: dict = Depends(get_current_user)
+    token: str = Depends(prof_or_ta_required)
 ):
     """
     Submit a file for a submittable.
@@ -2421,7 +2597,7 @@ async def download_submission(
         local_path = submission.file_url.lstrip('/')
         if not os.path.exists(local_path):
             raise HTTPException(status_code=404, detail="File not found")
-        
+
         # Return the file directly
         return FileResponse(
             local_path,
@@ -2544,7 +2720,6 @@ async def create_submittable(
     db: Session = Depends(get_db),
     token: str = Depends(prof_required)
 ):
-    """Create a new submittable with an optional reference file"""
     try:
         # Basic validation
         try:
@@ -2636,7 +2811,6 @@ async def create_submittable(
                 }
             }
         )
-
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -2814,7 +2988,7 @@ async def update_submittable(
             with open(file_path, "wb") as buffer:
                 shutil.copyfileobj(file.file, buffer)
             
-            existing_submittable.file_url = f"uploads/{file_name}"
+            existing_submittable.file_url = f"/uploads/{file_name}"
             existing_submittable.original_filename = file.filename
         
         db.commit()
@@ -3380,3 +3554,393 @@ async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# __________________________________
+#            OTP Flow
+# __________________________________
+
+
+
+# Pydantic models for forgot password flow
+class RequestOTPModel(BaseModel):
+    email: EmailStr
+
+class VerifyOTPModel(BaseModel):
+    email: EmailStr
+    otp: str
+
+class ResetPasswordWithOTPModel(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
+    confirm_password: str
+
+# Generate a cryptographically secure OTP
+def generate_secure_otp(length=6):
+    """Generate a cryptographically secure random OTP of specified length"""
+    # Use secrets module for cryptographic security
+    return ''.join(secrets.choice(string.digits) for _ in range(length))
+
+# Hash an OTP for secure storage
+def hash_otp(otp: str) -> str:
+    """Hash an OTP using the same password hashing mechanism"""
+    return pwd_context.hash(otp)
+
+# Verify a provided OTP against its hash
+def verify_otp(plain_otp: str, hashed_otp: str) -> bool:
+    """Verify an OTP against its hashed value"""
+    return pwd_context.verify(plain_otp, hashed_otp)
+
+# Generate a secure random string for passwords
+def generate_secure_string(length=10):
+    """Generate a cryptographically secure random string for temporary passwords"""
+    alphabet = string.ascii_letters + string.digits + string.punctuation
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+# Replace the previous OTP storage dictionary with database operations
+# OTP Request endpoint
+@app.post("/request-otp")
+async def request_otp(request: RequestOTPModel, db: Session = Depends(get_db)):
+    """
+    Request OTP for password reset and send it via email
+    """
+    try:
+        # Check if user with email exists
+        user = db.query(User).filter(User.email == request.email).first()
+        
+        if not user:
+            # For security, we still return the same message
+            # but we'll log this for debugging
+            print(f"OTP request for non-existent email: {request.email}")
+            return {
+                "message": "If the email exists in our system, a verification code has been sent. Please check your spam folder if you don't see it in your inbox.",
+                "status": "email_not_found"  # Add a status for debugging only
+            }
+        
+        # Generate secure OTP
+        plain_otp = generate_secure_otp(6)
+        print(f"Generated OTP for {user.email}: {plain_otp}")  # Only log during development
+        
+        # Hash the OTP for secure storage
+        hashed_otp = hash_otp(plain_otp)
+        
+        # Set expiration time (10 minutes from now)
+        expiration_time = datetime.now(timezone.utc) + timedelta(minutes=10)
+        
+        # Check if an OTP entry already exists for this user
+        existing_otp = db.query(UserOTP).filter(UserOTP.user_id == user.id).first()
+        
+        if existing_otp:
+            # Update existing OTP record
+            existing_otp.hashed_otp = hashed_otp
+            existing_otp.expires_at = expiration_time.isoformat()
+        else:
+            # Create new OTP record
+            new_otp_record = UserOTP(
+                user_id=user.id,
+                hashed_otp=hashed_otp,
+                expires_at=expiration_time.isoformat()
+            )
+            db.add(new_otp_record)
+        
+        # Commit the changes
+        db.commit()
+        
+        # Create email content
+        email_subject = "Your Password Reset Code - Sahara"
+        email_html = create_otp_email(plain_otp)
+        
+        # Send email with OTP
+        try:
+            print(f"Attempting to send email to {user.email} with OTP: {plain_otp}")
+            email_sent = send_email(user.email, email_subject, email_html)
+        except Exception as e:
+            print(f"Exception during email sending: {str(e)}")
+            print(traceback.format_exc())
+            email_sent = False
+        
+        if not email_sent:
+            print(f"Failed to send OTP email to {user.email}")
+            return {
+                "message": "If the email exists in our system, a verification code has been sent. Please check your spam folder if you don't see it in your inbox.",
+                "status": "email_attempted" # For debugging purposes
+            }
+        
+        # For security reasons, always return the same message whether email exists or not
+        return {
+            "message": "If the email exists in our system, a verification code has been sent. Please check your spam folder if you don't see it in your inbox.",
+            "status": "email_sent" # For debugging purposes
+        }
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        print(f"Error in request_otp: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process your request. Please try again."
+        )
+
+# Verify OTP endpoint
+@app.post("/verify-otp")
+async def verify_otp_endpoint(request: VerifyOTPModel, db: Session = Depends(get_db)):
+    """
+    Verify OTP provided by the user
+    """
+    try:
+        # Find user by email
+        user = db.query(User).filter(User.email == request.email).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Get OTP record for user
+        otp_record = db.query(UserOTP).filter(UserOTP.user_id == user.id).first()
+        
+        # Check if OTP record exists
+        if not otp_record:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No active OTP request found for this email"
+            )
+        
+        # Check if OTP has expired
+        expiration_time = datetime.fromisoformat(otp_record.expires_at)
+        if datetime.now(timezone.utc) > expiration_time:
+            # Delete expired OTP
+            db.delete(otp_record)
+            db.commit()
+            
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="OTP has expired. Please request a new one."
+            )
+        
+        # Verify OTP
+        if not verify_otp(request.otp, otp_record.hashed_otp):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OTP"
+            )
+        
+        # OTP is valid - do not delete yet as we need it for reset_password_with_otp
+        return {"message": "OTP verified successfully"}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error in verify_otp: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to verify OTP. Please try again."
+        )
+
+# Reset password with OTP endpoint
+@app.post("/reset-password-with-otp")
+async def reset_password_with_otp(request: ResetPasswordWithOTPModel, db: Session = Depends(get_db)):
+    """
+    Reset password after OTP verification
+    """
+    try:
+        # Find user by email
+        user = db.query(User).filter(User.email == request.email).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Get OTP record for user
+        otp_record = db.query(UserOTP).filter(UserOTP.user_id == user.id).first()
+        
+        # Check if OTP record exists
+        if not otp_record:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No active OTP request found for this email"
+            )
+        
+        # Check if OTP has expired
+        expiration_time = datetime.fromisoformat(otp_record.expires_at)
+        if datetime.now(timezone.utc) > expiration_time:
+            # Delete expired OTP
+            db.delete(otp_record)
+            db.commit()
+            
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="OTP has expired. Please request a new one."
+            )
+        
+        # Verify OTP
+        if not verify_otp(request.otp, otp_record.hashed_otp):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OTP"
+            )
+        
+        # Verify passwords match
+        if request.new_password != request.confirm_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Passwords do not match"
+            )
+        
+        # Hash the new password
+        hashed_password = create_hashed_password(request.new_password)
+        
+        # Update user's password
+        user.hashed_password = hashed_password
+        
+        # Delete the OTP record after successful password reset
+        db.delete(otp_record)
+        
+        # Commit changes
+        db.commit()
+        
+        return {"message": "Password reset successfully"}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        print(f"Error in reset_password_with_otp: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reset password. Please try again."
+        )
+
+# Email configuration - you should store these in environment variables in production
+EMAIL_HOST = "smtp.gmail.com"
+EMAIL_PORT = 587
+EMAIL_HOST_USER = "saharaai.noreply@gmail.com"  # Replace with your email
+EMAIL_HOST_PASSWORD = "zfrr wwru xeru rbhf"  # Replace with your app password
+EMAIL_USE_TLS = True
+DEFAULT_FROM_EMAIL = "Sahara Team <saharaai.noreply@gmail.com>"  # Fixed to use the actual email account
+
+# Function to send emails
+def send_email(to_email, subject, html_content):
+    """
+    Send an HTML email using SMTP
+    
+    Args:
+        to_email: Recipient email address
+        subject: Email subject
+        html_content: HTML body of the email
+    """
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = DEFAULT_FROM_EMAIL
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg['Date'] = formatdate(localtime=True)
+        
+        # Attach HTML content
+        msg.attach(MIMEText(html_content, 'html'))
+        
+        print(f"Attempting to send email to {to_email}")
+        
+        # Connect to SMTP server with more detailed error handling
+        try:
+            # Enable debug output
+            server = smtplib.SMTP(EMAIL_HOST, EMAIL_PORT)
+            server.set_debuglevel(1)  # Add this line to enable verbose debug output
+            print(f"Connected to SMTP server: {EMAIL_HOST}:{EMAIL_PORT}")
+            
+            if EMAIL_USE_TLS:
+                server.starttls()
+                print("TLS encryption enabled")
+            
+            print(f"Logging in with user: {EMAIL_HOST_USER}")
+            server.login(EMAIL_HOST_USER, EMAIL_HOST_PASSWORD)
+            print("Login successful")
+            
+            # Send email - more detailed debugging
+            print(f"Sending mail from {EMAIL_HOST_USER} to {to_email}")
+            result = server.sendmail(EMAIL_HOST_USER, to_email, msg.as_string())
+            print(f"Email sent successfully to {to_email}")
+            print(f"Server response: {result if result else 'No response (success)'}")
+            server.quit()
+            
+            return True
+        except smtplib.SMTPAuthenticationError as auth_err:
+            print(f"SMTP Authentication Error: {str(auth_err)}")
+            return False
+        except smtplib.SMTPRecipientsRefused as ref_err:
+            print(f"Recipients refused: {str(ref_err)}")
+            return False
+        except smtplib.SMTPSenderRefused as send_err:
+            print(f"Sender refused: {str(send_err)}")
+            return False
+        except smtplib.SMTPDataError as data_err:
+            print(f"SMTP data error: {str(data_err)}")
+            return False
+        except smtplib.SMTPException as smtp_e:
+            print(f"SMTP Error: {str(smtp_e)}")
+            return False
+        except Exception as conn_e:
+            print(f"Connection error: {str(conn_e)}")
+            print(f"Error type: {type(conn_e).__name__}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return False
+    except Exception as e:
+        print(f"Failed to prepare email: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+
+# Create HTML email template for OTP
+def create_otp_email(otp, expiry_minutes=10):
+    """
+    Create HTML email content for OTP verification
+    
+    Args:
+        otp: The one-time password
+        expiry_minutes: Validity period in minutes
+    
+    Returns:
+        HTML content as string
+    """
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Password Reset Code</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ background-color: #4CAF50; color: white; padding: 10px; text-align: center; }}
+            .content {{ padding: 20px; background-color: #f9f9f9; }}
+            .code {{ font-size: 24px; font-weight: bold; text-align: center; 
+                    padding: 15px; background-color: #e9e9e9; margin: 20px 0; letter-spacing: 5px; }}
+            .footer {{ font-size: 12px; text-align: center; margin-top: 20px; color: #1f2e6a; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>Password Reset Verification</h2>
+            </div>
+            <div class="content">
+                <p>Hello,</p>
+                <p>You've requested to reset your password for your Sahara account.</p>
+                <p>Please use the following verification code to complete the process:</p>
+                
+                <div class="code">{otp}</div>
+                
+                <p>This code is valid for {expiry_minutes} minutes and can only be used once.</p>
+                <p>If you didn't request a password reset, please ignore this email or contact support if you have concerns.</p>
+            </div>
+            <div class="footer">
+                <p>This is an automated message, please do not reply directly to this email.</p>
+                <p>&copy; {datetime.now().year} Sahara Team</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
