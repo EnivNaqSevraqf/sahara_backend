@@ -34,6 +34,7 @@ from io import StringIO
 from fastapi.staticfiles import StaticFiles
 from typing import ForwardRef
 import base64
+import dotenv
 
 # Create uploads directory if it doesn't exist
 os.makedirs("uploads", exist_ok=True)
@@ -172,7 +173,7 @@ class User(Base):
 
     role = relationship("Role", back_populates="users")
     teams = relationship("Team", secondary="team_members", back_populates="members")
-    responses = relationship("FormResponse", back_populates="user")
+    form_responses = relationship("FormResponse", back_populates="user")
     gradeables = relationship("Gradeable", back_populates="creator")
     calendar_events = relationship("UserCalendarEvent", back_populates="creator")
     team_calendar_events = relationship("TeamCalendarEvent", back_populates="creator")
@@ -279,7 +280,7 @@ class FormResponse(Base):
     submitted_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     response_data = Column(String, nullable=False)  # JSON or serialized response data
 
-    user = relationship("User", back_populates="responses")
+    user = relationship("User", back_populates="form_responses")
     form = relationship("Form", back_populates="responses")
 
 
@@ -663,8 +664,8 @@ def create_default_admin():
 ###
 # Authentication
 ###
-
-SECRET_KEY = secrets.token_hex(32)
+dotenv.load_dotenv()
+SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -1649,7 +1650,9 @@ async def api_check_deadline(form_id: int, db: Session = Depends(get_db)):
 @app.post("/api/get_forms")
 async def api_get_forms(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Get all forms with info about whether the user has submitted a response"""
-    forms = get_all_forms_db(user.id, db)
+    print("over here")
+    forms = get_all_forms_db(user["user"].id, db)
+    print("Forms:", forms)
     return JSONResponse(status_code=200, content=forms)
 
 @app.get("/api/forms/{form_id}/user/{user_id}")
