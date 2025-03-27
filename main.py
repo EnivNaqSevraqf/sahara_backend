@@ -105,9 +105,9 @@ class Submittable(Base):
     description = Column(String, nullable=False)
     file_url = Column(String, nullable=False)  # URL path to the reference file
     original_filename = Column(String, nullable=False)
+    max_score = Column(Integer, nullable=False)  # Maximum possible score for this submittable
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
     creator = relationship("User", back_populates="submittables")
     submissions = relationship("Submission", back_populates="submittable")
 
@@ -127,6 +127,7 @@ class Submission(Base):
     file_url = Column(String, nullable=False)  # URL path to the reference file
     original_filename = Column(String, nullable=False)
     submittable_id = Column(Integer, ForeignKey("submittables.id"), nullable=False)
+    score = Column(Integer, nullable=True)  # Score received for this submission
 
     team = relationship("Team", back_populates="submissions")
     submittable = relationship("Submittable", back_populates="submissions")
@@ -608,6 +609,23 @@ with engine.connect() as connection:
             IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                           WHERE table_name = 'submittables' AND column_name = 'original_filename') THEN
                 ALTER TABLE submittables ADD COLUMN original_filename VARCHAR;
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                          WHERE table_name = 'submittables' AND column_name = 'max_score') THEN
+                ALTER TABLE submittables ADD COLUMN max_score INTEGER NOT NULL DEFAULT 100;
+            END IF;
+        END $$;
+    """))
+    connection.commit()
+
+    # Add missing columns to submissions table if they don't exist
+    connection.execute(text("""
+        DO $$ 
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                          WHERE table_name = 'submissions' AND column_name = 'score') THEN
+                ALTER TABLE submissions ADD COLUMN score INTEGER;
             END IF;
         END $$;
     """))
@@ -2273,7 +2291,8 @@ def parse_scores_from_csv(csv_content: str,
     return scores
 
 
-
+# submittables start here 
+# this is to submit file for a submittable, done by students
 @app.post("/submittables/{submittable_id}/submit")
 async def submit_file(
     submittable_id: int,
@@ -2335,7 +2354,8 @@ async def submit_file(
         team_id=user.team_id,
         file_url=file_path,
         original_filename=file.filename,
-        submittable_id=submittable_id
+        submittable_id=submittable_id,
+        score=None  # Initialize score as None since it hasn't been graded yet
     )
 
     try:
@@ -2345,7 +2365,9 @@ async def submit_file(
         return {
             "message": "File submitted successfully",
             "submission_id": submission.id,
-            "original_filename": submission.original_filename
+            "original_filename": submission.original_filename,
+            "max_score": submittable.max_score,  # Include max_score in response
+            "score": submission.score  # Include current score (will be None for new submissions)
         }
     except Exception as e:
         # If database operation fails, delete the uploaded file
@@ -2353,6 +2375,7 @@ async def submit_file(
             os.remove(file_path)
         raise HTTPException(status_code=500, detail=f"Failed to create submission record: {str(e)}")
 
+# this is to download the file for a submission, done by profs and students
 @app.get("/submissions/{submission_id}/download")
 async def download_submission(
     submission_id: int,
@@ -2384,6 +2407,7 @@ async def download_submission(
         if not os.path.exists(local_path):
             raise HTTPException(status_code=404, detail="File not found")
         
+        # Return the file directly
         return FileResponse(
             local_path,
             filename=submission.original_filename,
@@ -2394,6 +2418,7 @@ async def download_submission(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading submission: {str(e)}")
 
+# this is to get all submittables categorized by status, done by students and profs
 @app.get("/submittables/")
 async def get_submittables(
     db: Session = Depends(get_db),
@@ -2416,10 +2441,11 @@ async def get_submittables(
             submission = team_submissions.get(s.id)
             return {
                 "id": s.id,
-                "title": s.title,  # Ensure title is included
+                "title": s.title,
                 "description": s.description,
                 "opens_at": s.opens_at,
                 "deadline": s.deadline,
+                "max_score": s.max_score,  # Add max_score from submittable
                 "reference_files": [{
                     "original_filename": s.original_filename
                 }] if s.file_url else [],
@@ -2427,7 +2453,8 @@ async def get_submittables(
                     "has_submitted": bool(submission),
                     "submission_id": submission.id if submission else None,
                     "submitted_on": submission.submitted_on if submission else None,
-                    "original_filename": submission.original_filename if submission else None
+                    "original_filename": submission.original_filename if submission else None,
+                    "score": submission.score if submission else None  # Add score from submission
                 }
             }
 
@@ -2457,6 +2484,7 @@ async def get_submittables(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submittables: {str(e)}")
 
+# this is to download the reference file for a submittable, done by students and profs
 @app.get("/submittables/{submittable_id}/reference-files/download")
 async def download_reference_file(
     submittable_id: int,
@@ -2489,12 +2517,13 @@ async def download_reference_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
-
+# this is to create a new submittable, done by profs
 @app.post("/submittables/create")
 async def create_submittable(
     title: str = FastAPIForm(...),
     deadline: str = FastAPIForm(...),
     description: str = FastAPIForm(...),
+    max_score: int = FastAPIForm(...),  # Add max_score parameter
     opens_at: Optional[str] = FastAPIForm(None),
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
@@ -2504,15 +2533,23 @@ async def create_submittable(
     try:
         # Basic validation
         try:
-            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
             if opens_at:
-                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                opens_at_dt = datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                # Validate that opens_at is before deadline
+                if opens_at_dt >= deadline_dt:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="opens_at must be before deadline"
+                    )
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format")
-        
+            
+        # Validate max_score
+        if max_score <= 0:
+            raise HTTPException(status_code=400, detail="Maximum score must be greater than zero")
+            
         # Get the creator (professor) from token
-        # Fix: Don't decode the token as it's already decoded by the dependency
-        # payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         payload = token  # The token is already decoded by prof_required dependency
         username = payload.get("sub")
         user = db.query(User).filter(User.username == username).first()
@@ -2525,6 +2562,7 @@ async def create_submittable(
             title=title,
             deadline=deadline,
             description=description,
+            max_score=max_score,  # Add max_score to submittable creation
             opens_at=opens_at,
             creator_id=user.id,
             file_url="",  # Default empty string
@@ -2568,6 +2606,7 @@ async def create_submittable(
                     "opens_at": submittable.opens_at,
                     "deadline": submittable.deadline,
                     "description": submittable.description,
+                    "max_score": submittable.max_score,  # Include max_score in response
                     "created_at": submittable.created_at,
                     "reference_files": [{
                         "original_filename": submittable.original_filename
@@ -2576,7 +2615,8 @@ async def create_submittable(
                         "has_submitted": False,
                         "submission_id": None,
                         "submitted_on": None,
-                        "original_filename": None
+                        "original_filename": None,
+                        "score": None  # Include score field in submission status
                     }
                 }
             }
@@ -2588,6 +2628,7 @@ async def create_submittable(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error creating submittable: {str(e)}")
 
+# this is to get details of a specific submittable, done by students and profs
 @app.get("/submittables/{submittable_id}")
 async def get_submittable(
     submittable_id: int,
@@ -2606,6 +2647,7 @@ async def get_submittable(
             "opens_at": submittable.opens_at,
             "deadline": submittable.deadline,
             "description": submittable.description,
+            "max_score": submittable.max_score,
             "created_at": submittable.created_at,
             "reference_file": {
                 "file_url": submittable.file_url,
@@ -2617,6 +2659,7 @@ async def get_submittable(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submittable: {str(e)}")
 
+# this is to get all submissions for a submittable, done by profs
 @app.get("/submittables/{submittable_id}/submissions")
 async def get_submittable_submissions(
     submittable_id: int,
@@ -2640,6 +2683,8 @@ async def get_submittable_submissions(
                 "id": submission.id,
                 "team_id": submission.team_id,
                 "submitted_on": submission.submitted_on,
+                "score": submission.score,
+                "max_score": submittable.max_score,
                 "file": {
                     "file_url": submission.file_url,
                     "original_filename": submission.original_filename
@@ -2653,6 +2698,7 @@ async def get_submittable_submissions(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submissions: {str(e)}")
 
+# this is to delete a submittable and all its submissions, done by profs
 @app.delete("/submittables/{submittable_id}")
 async def delete_submittable(
     submittable_id: int,
@@ -2693,13 +2739,14 @@ async def delete_submittable(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting submittable: {str(e)}")
 
-
+# this is to update a submittable, done by profs
 @app.put("/submittables/{submittable_id}")
 async def update_submittable(
     submittable_id: int,
     title: str = FastAPIForm(...),
     deadline: str = FastAPIForm(...),
     description: str = FastAPIForm(...),
+    max_score: int = FastAPIForm(...),
     opens_at: Optional[str] = FastAPIForm(None),
     file: Optional[UploadFile] = None,
     db: Session = Depends(get_db),
@@ -2709,11 +2756,21 @@ async def update_submittable(
     try:
         # Basic validation
         try:
-            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
             if opens_at:
-                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                opens_at_dt = datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                # Validate that opens_at is before deadline
+                if opens_at_dt >= deadline_dt:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="opens_at must be before deadline"
+                    )
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format")
+            
+        # Validate max_score
+        if max_score <= 0:
+            raise HTTPException(status_code=400, detail="Maximum score must be greater than zero")
             
         existing_submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
         if not existing_submittable:
@@ -2724,6 +2781,7 @@ async def update_submittable(
         existing_submittable.opens_at = opens_at
         existing_submittable.deadline = deadline
         existing_submittable.description = description
+        existing_submittable.max_score = max_score
         
         # Handle file update if provided
         if file:
@@ -2759,6 +2817,7 @@ async def update_submittable(
             os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error updating submittable: {str(e)}")
 
+# this is to delete a submission, done by profs or the student who submitted        
 @app.delete("/submissions/{submission_id}")
 async def delete_submission(
     submission_id: int,
@@ -2794,6 +2853,51 @@ async def delete_submission(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting submission: {str(e)}")
+
+# this is to grade a submission, done by profs
+@app.put("/submissions/{submission_id}/grade")
+async def grade_submission(
+    submission_id: int,
+    score: int = FastAPIForm(...),
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_required)
+):
+    """Grade a submission (professors only)"""
+    try:
+        # Get the submission
+        submission = db.query(Submission).filter(Submission.id == submission_id).first()
+        if not submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+        
+        # Get the submittable to check max score
+        submittable = db.query(Submittable).filter(Submittable.id == submission.submittable_id).first()
+        if not submittable:
+            raise HTTPException(status_code=404, detail="Submittable not found")
+        
+        # Validate score
+        if score < 0:
+            raise HTTPException(status_code=400, detail="Score cannot be negative")
+        if score > submittable.max_score:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Score cannot exceed maximum score of {submittable.max_score}"
+            )
+        
+        # Update the submission score
+        submission.score = score
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={
+            "message": "Submission graded successfully",
+            "submission_id": submission.id,
+            "score": submission.score,
+            "max_score": submittable.max_score
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error grading submission: {str(e)}")
 
 ##Chatting Routes
 
