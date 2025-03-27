@@ -4,6 +4,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, 
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text
+from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, validates
 from sqlalchemy.dialects.postgresql import JSONB, insert
@@ -109,9 +110,9 @@ class Submittable(Base):
     description = Column(String, nullable=False)
     file_url = Column(String, nullable=False)  # URL path to the reference file
     original_filename = Column(String, nullable=False)
+    max_score = Column(Integer, nullable=False)  # Maximum possible score for this submittable
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
     creator = relationship("User", back_populates="submittables")
     submissions = relationship("Submission", back_populates="submittable")
 
@@ -131,6 +132,7 @@ class Submission(Base):
     file_url = Column(String, nullable=False)  # URL path to the reference file
     original_filename = Column(String, nullable=False)
     submittable_id = Column(Integer, ForeignKey("submittables.id"), nullable=False)
+    score = Column(Integer, nullable=True)  # Score received for this submission
 
     team = relationship("Team", back_populates="submissions")
     submittable = relationship("Submittable", back_populates="submissions")
@@ -210,7 +212,7 @@ class Announcement(Base):
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     title = Column(String, nullable=False)
-    content = Column(JSONB, nullable=False)
+    content = Column(String, nullable=False)  # Supports Markdown formatting for rich text
     url_name = Column(String, unique=True, nullable=True)
     
     @validates("creator_id")
@@ -573,8 +575,8 @@ class AssignTeamSkillsRequest(BaseModel):
 
 class GradeableCreateRequest(BaseModel):
     title: str
-    description: str
-    due_date: str  # ISO 8601 format
+    #description: str
+    #due_date: str  # ISO 8601 format
     max_points: int
     
     @validator('due_date')
@@ -620,6 +622,23 @@ with engine.connect() as connection:
             IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                           WHERE table_name = 'submittables' AND column_name = 'original_filename') THEN
                 ALTER TABLE submittables ADD COLUMN original_filename VARCHAR;
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                          WHERE table_name = 'submittables' AND column_name = 'max_score') THEN
+                ALTER TABLE submittables ADD COLUMN max_score INTEGER NOT NULL DEFAULT 100;
+            END IF;
+        END $$;
+    """))
+    connection.commit()
+
+    # Add missing columns to submissions table if they don't exist
+    connection.execute(text("""
+        DO $$ 
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                          WHERE table_name = 'submissions' AND column_name = 'score') THEN
+                ALTER TABLE submissions ADD COLUMN score INTEGER;
             END IF;
         END $$;
     """))
@@ -1201,7 +1220,7 @@ class Show(BaseModel):
     creator_id: int
     created_at: str
     title: str
-    content: dict
+    content: str  # Contains Markdown formatted text
     url_name: Optional[str] = None
 
     class Config:
@@ -1209,36 +1228,31 @@ class Show(BaseModel):
 
 @app.post('/announcements', status_code=status.HTTP_201_CREATED)
 async def create(
-    title: Annotated[str, Form()],
-    description: Annotated[str, Form()],
-    file: Union[UploadFile, None] = None,
-    db: Session = Depends(get_db),
+    title: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
 ):
     try:
-        # Handle file upload if provided
-        file_location = None
-        if file and file.filename:
-            file_extension = file.filename.split('.')[-1]
-            file_name = f"{uuid.uuid4()}.{file_extension}"
-            file_location = f"uploads/{file_name}"
-            with open(file_location, "wb") as buffer:
-                shutil.copyfileobj(file.file, buffer)
-
-        # Parse description JSON
-        try:
-            description_json = json.loads(description)
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
+        # Create file path
+        file_extension = os.path.splitext(file.filename)[1]
+        file_name = f"{uuid.uuid4()}{file_extension}"
+        file_path = os.path.join("uploads", file_name)
         
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Ensure uploads directory exists
+        os.makedirs("uploads", exist_ok=True)
         
-        # Create new announcement
-        new_announcement = Announcement(
-            creator_id=1,
-            created_at=current_time,
+        # Save the file
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        # Create announcement in database
+        db_announcement = Announcement(
             title=title,
-            content=description_json,
-            url_name=file_location
+            content=description,
+            url_name=file_name,
+            creator_id=1  # Default creator ID
         )
         
         db.add(new_announcement)
@@ -1250,27 +1264,76 @@ async def create(
     except HTTPException as e:
         raise e
     except Exception as e:
-        if file_location and os.path.exists(file_location):
-            os.remove(file_location)  # Clean up file if something went wrong
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))
 
+@app.get('/announcements/{announcement_id}/download')
+async def download_announcement_file(
+    announcement_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        announcement = db.query(Announcement).filter(Announcement.id == announcement_id).first()
+        if not announcement or not announcement.url_name:
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        file_path = os.path.join("uploads", announcement.url_name)
+        if not os.path.exists(file_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Determine content type based on file extension
+        file_extension = os.path.splitext(announcement.url_name)[1].lower()
+        content_type = {
+            '.pdf': 'application/pdf',
+            '.doc': 'application/msword',
+            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.txt': 'text/plain'
+        }.get(file_extension, 'application/octet-stream')
+        
+        return FileResponse(
+            file_path,
+            filename=announcement.url_name,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{announcement.url_name}"'
+            }
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
-def destroy(id:int, db:Session=Depends(get_db)):
-    blog=db.query(Announcement).filter(Announcement.id==id)
-    if not blog.first():
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
-    if blog.first().url_name and os.path.exists(blog.first().url_name):  # Changed from file_path to url_name
-        os.remove(blog.first().url_name)
-    blog.delete(synchronize_session=False)
-    db.commit()
-    return 'done'
+@app.get('/announcements', response_model=List[Show])
+def all(db: Session = Depends(get_db)):
+    announcements = db.query(Announcement).order_by(Announcement.created_at.desc()).all()
+    return announcements
+
+@app.delete('/announcements/{announcement_id}')
+def destroy(announcement_id: int, db: Session = Depends(get_db)):
+    announcement = db.query(Announcement).filter(Announcement.id == announcement_id).first()
+    if not announcement:
+        raise HTTPException(status_code=404, detail="Announcement not found")
+    
+    try:
+        # Delete the associated file if it exists
+        if announcement.url_name:
+            file_path = os.path.join("uploads", announcement.url_name)
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        
+        # Delete the announcement from database
+        db.delete(announcement)
+        db.commit()
+        return {"message": "Announcement deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting announcement: {str(e)}")
 
 @app.put('/announcements/{id}', status_code=status.HTTP_202_ACCEPTED)
 def update(
     id: int,
     title: Annotated[str, Form()],
-    description: Annotated[str, Form()],
+    description: Annotated[str, Form()],  # Now expects plain text
     file: UploadFile | None = None,
     db: Session = Depends(get_db)
 ):
@@ -1289,19 +1352,26 @@ def update(
         with open(new_url_name, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
     
-    try:
-        description_json = json.loads(description)
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON for description")
-    
     # Update only the modifiable fields
     announcement.first().title = title
-    announcement.first().content = description_json
+    announcement.first().content = description  # Store description directly as string
     announcement.first().url_name = new_url_name
 
     db.commit()
     db.refresh(announcement.first())
     return {"detail": "Announcement updated", "announcement": announcement.first()}
+
+@app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
+def destroy(id:int, db:Session=Depends(get_db)):
+    blog=db.query(Announcement).filter(Announcement.id==id)
+    if not blog.first():
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
+    if blog.first().url_name and os.path.exists(blog.first().url_name):  # Changed from file_path to url_name
+        os.remove(blog.first().url_name)
+    blog.delete(synchronize_session=False)
+    db.commit()
+    return 'done'
+
 
 @app.get('/announcements', response_model=List[Show])
 def all(db:Session = Depends(get_db)):
@@ -2052,11 +2122,6 @@ async def get_gradeable_by_id(
     return JSONResponse(status_code=200, content={
         "id": gradeable.id,
         "title": gradeable.title,
-        "description": gradeable.description,
-        "due_date": gradeable.due_date,
-        "created_at": gradeable.created_at,
-
-        #"updated_at": gradeable.updated_at
     })
 @app.get("/gradeables/{gradeable_id}/scores")
 async def get_gradeable_submissions(
@@ -2072,6 +2137,8 @@ async def get_gradeable_submissions(
     for submission in submissions:
         results.append({
             "id": submission.id,
+            "user_id": submission.user_id,
+            "name": submission.user.name,
             "gradeable_id": submission.gradeable_id,
             "user_id": submission.user_id, 
             "name": submission.user.name,
@@ -2080,7 +2147,7 @@ async def get_gradeable_submissions(
         })
     return JSONResponse(status_code=200, content=results)
 
-@app.get("/gradeables/{gradeable_id}/upload-scores")
+@app.post("/gradeables/{gradeable_id}/upload-scores")
 async def upload_gradeable_scores(
     gradeable_id: int,
     file: UploadFile = File(...),
@@ -2098,29 +2165,40 @@ async def upload_gradeable_scores(
         )
     
     try:
-        # Read file content
+        # Validate gradeable exists and get max points
+        gradeable = db.query(Gradeable).filter(Gradeable.id == gradeable_id).first()
+        if not gradeable:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Gradeable not found"
+            )
+        
+        # Read and parse file content
         content = await file.read()
         content_str = content.decode('utf-8')
         
-        # Parse CSV content
-        scores = parse_scores_from_csv(content_str)
+        # Parse scores with detailed validation
+        scores = parse_scores_from_csv(
+            csv_content=content_str, 
+            gradeable_id=gradeable_id, 
+            max_points=gradeable.max_points,
+            db=db
+        )
         
-        # Update scores in the database
-        for score in scores:
-            submission = db.query(GradeableScores).filter(
+        # Bulk upsert scores
+        for score_data in scores:
+            existing_submission = db.query(GradeableScores).filter(
                 GradeableScores.gradeable_id == gradeable_id,
-                GradeableScores.user_id == score["user_id"]
+                GradeableScores.user_id == score_data["user_id"]
             ).first()
             
-            if submission:
-                submission.score = score["score"]
-                submission.submitted_at = datetime.now(timezone.utc).isoformat()
+            if existing_submission:
+                existing_submission.score = score_data["score"]
             else:
                 new_submission = GradeableScores(
-                    user_id=score["user_id"],
+                    user_id=score_data["user_id"],
                     gradeable_id=gradeable_id,
-                    score=score["score"],
-                    submitted_at=datetime.now(timezone.utc).isoformat()
+                    score=score_data["score"]
                 )
                 db.add(new_submission)
         
@@ -2131,63 +2209,59 @@ async def upload_gradeable_scores(
             "gradeable_id": gradeable_id,
             "total_submissions": len(scores)
         })
+    
+    except ValueError as ve:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(ve))
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error uploading scores: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Unexpected error uploading scores: {str(e)}")
+        
+        
 
 @app.post("/gradeables/create")
 async def create_gradeable(
     gradeable: GradeableCreateRequest,
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
+    user_data: User = Depends(prof_or_ta_required),
+    db: Session = Depends(get_db)
 ):
-    """
-    Create a new gradeable
-    """
+    """Create a new gradeable"""
+    print("HI")
+    username = user_data.get('sub')
+    user = db.query(User).filter(User.username == username).first()
+    print("2137")
     try:
-        # Extract the token payload to get the creator ID (username)
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        user = db.query(User).filter(User.username == username).first()
-        
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        
-        # Check if a gradeable with the same title already exists
-        existing_gradeable = db.query(Gradeable).filter(Gradeable.title == gradeable.title).first()
-        if existing_gradeable:
-            raise HTTPException(status_code=400, detail="Gradeable with this title already exists")
-        
-        # Create new gradeable
+        print("Title is", gradeable.title, "Max points is", gradeable.max_points, "Creator ID is", user.id)
         new_gradeable = Gradeable(
             title=gradeable.title,
-            description=gradeable.description,
-            due_date=gradeable.due_date,
             max_points=gradeable.max_points,
-            creator_id=user.id,
-            created_at=datetime.now(timezone.utc).isoformat()
+            creator_id=user.id
         )
         
+        print("Hello")
         db.add(new_gradeable)
         db.commit()
         db.refresh(new_gradeable)
+        print("HELLO")
+
         
         return JSONResponse(status_code=201, content={
-            "id": new_gradeable.id,
+            #"id": new_gradeable.id,
             "title": new_gradeable.title,
-            "description": new_gradeable.description,
-            "due_date": new_gradeable.due_date,
             "max_points": new_gradeable.max_points,
             "creator_id": new_gradeable.creator_id,
-            "created_at": new_gradeable.created_at
         })
-    except HTTPException as he:
-        raise he
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error creating gradeable: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error creating gradeable: {str(e)}"
+        )
 
-def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
+def parse_scores_from_csv(csv_content: str, 
+    gradeable_id: int, 
+    max_points: int,
+    db: Session) -> List[Dict[str, Any]]:
     """
     Parse CSV content containing user scores.
     Expected CSV format: user_id,score
@@ -2202,7 +2276,7 @@ def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
     # from io import StringIO
     
     scores = []
-    processed_user_ids = set()
+    processed_usernames = set()
     
     # Parse the CSV content
     try:
@@ -2210,23 +2284,31 @@ def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
         csv_reader = csv.DictReader(csv_file)
         
         # Check required headers
-        required_headers = ['user_id', 'score']
+        required_headers = ['id','username', 'score']
         headers = csv_reader.fieldnames
-        
-        if not all(header in headers for header in required_headers):
-            raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
-        
+        print("headers are", headers)
+        # if not all(header in headers for header in required_headers):
+        #     print(f"Warning: Extra headers found: {headers}. Proceeding with parsing.")
+        #     raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
+        print("line")
         # Process each row
-        for row in csv_reader:
+        for row_num, row in enumerate(csv_reader, start=2):
+            print("hihfi")
+            print("Row is", row)
             try:
-                user_id = int(row['user_id'])
+                username = row['username'].strip()
                 score = int(row['score'])
                 
+                user = db.query(User).filter(User.username == username).first()
+                if not user:
+                    raise ValueError(f"User with username '{username}' not found on row {row_num}")
+
+                print("User ID is", user_id, "Score is", score)
                 scores.append({
                     'user_id': user_id,
                     'score': score
                 })
-                processed_user_ids.add(user_id)
+                processed_usernames.add(username)
             except (ValueError, KeyError) as e:
                 # Skip invalid rows but continue processing
                 print(f"Error processing row: {row}. Error: {str(e)}")
@@ -2236,27 +2318,23 @@ def parse_scores_from_csv(csv_content: str) -> List[Dict[str, Any]]:
         raise ValueError(f"Error parsing CSV: {str(e)}")
     
     # Get all students from the database and add default score of 0 for missing ones
-    with SessionLocal() as db:
         # Get student role ID
-        student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
-        if student_role:
-            # Get all student users
-            students = db.query(User).filter(User.role_id == student_role.id).all()
-            
-            # Add default score of 0 for students not in the CSV
-            for student in students:
-                if student.id not in processed_user_ids:
-                    scores.append({
-                        'user_id': student.id,
-                        'score': 0
-                    })
+    student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
+    if student_role:
+        students = db.query(User).filter(User.role_id == student_role.id).all()
+        
+        for student in students:
+            if student.id not in processed_user_ids:
+                scores.append({
+                    'user_id': student.id,
+                    'score': 0
+                })
     
     return scores
 
-# __________________________________
-#           Submittables
-# __________________________________
 
+# submittables start here 
+# this is to submit file for a submittable, done by students
 @app.post("/submittables/{submittable_id}/submit")
 async def submit_file(
     submittable_id: int,
@@ -2318,7 +2396,8 @@ async def submit_file(
         team_id=user.team_id,
         file_url=file_path,
         original_filename=file.filename,
-        submittable_id=submittable_id
+        submittable_id=submittable_id,
+        score=None  # Initialize score as None since it hasn't been graded yet
     )
 
     try:
@@ -2328,7 +2407,9 @@ async def submit_file(
         return {
             "message": "File submitted successfully",
             "submission_id": submission.id,
-            "original_filename": submission.original_filename
+            "original_filename": submission.original_filename,
+            "max_score": submittable.max_score,  # Include max_score in response
+            "score": submission.score  # Include current score (will be None for new submissions)
         }
     except Exception as e:
         # If database operation fails, delete the uploaded file
@@ -2336,6 +2417,7 @@ async def submit_file(
             os.remove(file_path)
         raise HTTPException(status_code=500, detail=f"Failed to create submission record: {str(e)}")
 
+# this is to download the file for a submission, done by profs and students
 @app.get("/submissions/{submission_id}/download")
 async def download_submission(
     submission_id: int,
@@ -2367,6 +2449,7 @@ async def download_submission(
         if not os.path.exists(local_path):
             raise HTTPException(status_code=404, detail="File not found")
         
+        # Return the file directly
         return FileResponse(
             local_path,
             filename=submission.original_filename,
@@ -2377,6 +2460,7 @@ async def download_submission(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading submission: {str(e)}")
 
+# this is to get all submittables categorized by status, done by students and profs
 @app.get("/submittables/")
 async def get_submittables(
     db: Session = Depends(get_db),
@@ -2399,19 +2483,20 @@ async def get_submittables(
             submission = team_submissions.get(s.id)
             return {
                 "id": s.id,
-                "title": s.title,  # Ensure title is included
+                "title": s.title,
                 "description": s.description,
                 "opens_at": s.opens_at,
                 "deadline": s.deadline,
+                "max_score": s.max_score,  # Add max_score from submittable
                 "reference_files": [{
-                    "id": 1,  # Using a placeholder ID for now
                     "original_filename": s.original_filename
                 }] if s.file_url else [],
                 "submission_status": {
                     "has_submitted": bool(submission),
                     "submission_id": submission.id if submission else None,
                     "submitted_on": submission.submitted_on if submission else None,
-                    "original_filename": submission.original_filename if submission else None
+                    "original_filename": submission.original_filename if submission else None,
+                    "score": submission.score if submission else None  # Add score from submission
                 }
             }
 
@@ -2441,6 +2526,7 @@ async def get_submittables(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submittables: {str(e)}")
 
+# this is to download the reference file for a submittable, done by students and profs
 @app.get("/submittables/{submittable_id}/reference-files/download")
 async def download_reference_file(
     submittable_id: int,
@@ -2473,30 +2559,39 @@ async def download_reference_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
-
+# this is to create a new submittable, done by profs
 @app.post("/submittables/create")
 async def create_submittable(
     title: str = FastAPIForm(...),
     deadline: str = FastAPIForm(...),
     description: str = FastAPIForm(...),
+    max_score: int = FastAPIForm(...),  # Add max_score parameter
     opens_at: Optional[str] = FastAPIForm(None),
-    file: UploadFile = File(...),
+    file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
     token: str = Depends(prof_required)
 ):
-    """Create a new submittable with a reference file"""
+    """Create a new submittable with an optional reference file"""
     try:
         # Basic validation
         try:
-            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
             if opens_at:
-                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                opens_at_dt = datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                # Validate that opens_at is before deadline
+                if opens_at_dt >= deadline_dt:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="opens_at must be before deadline"
+                    )
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format")
-        
+            
+        # Validate max_score
+        if max_score <= 0:
+            raise HTTPException(status_code=400, detail="Maximum score must be greater than zero")
+            
         # Get the creator (professor) from token
-        # Fix: Don't decode the token as it's already decoded by the dependency
-        # payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         payload = token  # The token is already decoded by prof_required dependency
         username = payload.get("sub")
         user = db.query(User).filter(User.username == username).first()
@@ -2504,43 +2599,78 @@ async def create_submittable(
         if not user:
             raise HTTPException(status_code=404, detail="User not found")
 
-        # Save the reference file
-        file_extension = file.filename.split('.')[-1]
-        file_name = f"ref_{uuid.uuid4()}.{file_extension}"
-        file_path = f"uploads/{file_name}"
-        
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
-
-        # Create submittable in database with file information
-        new_submittable = Submittable(
+        # Create submittable object
+        submittable = Submittable(
             title=title,
-            opens_at=opens_at,
             deadline=deadline,
             description=description,
+            max_score=max_score,  # Add max_score to submittable creation
+            opens_at=opens_at,
             creator_id=user.id,
-            file_url=f"/uploads/{file_name}",  # URL path
-            original_filename=file.filename
+            file_url="",  # Default empty string
+            original_filename=""  # Default empty string
         )
-        
-        db.add(new_submittable)
+
+        # Handle file upload if provided
+        if file:
+            # Create uploads directory if it doesn't exist
+            upload_dir = "uploads"
+            if not os.path.exists(upload_dir):
+                os.makedirs(upload_dir)
+
+            # Generate unique filename
+            file_extension = os.path.splitext(file.filename)[1]
+            unique_filename = f"{uuid.uuid4()}{file_extension}"
+            file_path = os.path.join(upload_dir, unique_filename)
+
+            # Save file
+            with open(file_path, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
+
+            # Update submittable with file information
+            submittable.file_url = file_path
+            submittable.original_filename = file.filename
+
+        # Add to database
+        db.add(submittable)
         db.commit()
-        db.refresh(new_submittable)
-        
-        return JSONResponse(status_code=201, content={
-            "message": "Submittable created successfully",
-            "submittable_id": new_submittable.id
-        })
+        db.refresh(submittable)
+
+        # Return JSON response with proper structure
+        return JSONResponse(
+            status_code=201,
+            content={
+                "message": "Submittable created successfully",
+                "submittable": {
+                    "id": submittable.id,
+                    "title": submittable.title,
+                    "opens_at": submittable.opens_at,
+                    "deadline": submittable.deadline,
+                    "description": submittable.description,
+                    "max_score": submittable.max_score,  # Include max_score in response
+                    "created_at": submittable.created_at,
+                    "reference_files": [{
+                        "original_filename": submittable.original_filename
+                    }] if submittable.file_url else [],
+                    "submission_status": {
+                        "has_submitted": False,
+                        "submission_id": None,
+                        "submitted_on": None,
+                        "original_filename": None,
+                        "score": None  # Include score field in submission status
+                    }
+                }
+            }
+        )
+
     except HTTPException as he:
-        if 'file_path' in locals() and os.path.exists(file_path):
-            os.remove(file_path)  # Clean up file if validation fails
         raise he
     except Exception as e:
         db.rollback()
-        if 'file_path' in locals() and os.path.exists(file_path):
-            os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error creating submittable: {str(e)}")
 
+# this is to get details of a specific submittable, done by students and profs
 @app.get("/submittables/{submittable_id}")
 async def get_submittable(
     submittable_id: int,
@@ -2559,6 +2689,7 @@ async def get_submittable(
             "opens_at": submittable.opens_at,
             "deadline": submittable.deadline,
             "description": submittable.description,
+            "max_score": submittable.max_score,
             "created_at": submittable.created_at,
             "reference_file": {
                 "file_url": submittable.file_url,
@@ -2570,6 +2701,7 @@ async def get_submittable(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submittable: {str(e)}")
 
+# this is to get all submissions for a submittable, done by profs
 @app.get("/submittables/{submittable_id}/submissions")
 async def get_submittable_submissions(
     submittable_id: int,
@@ -2593,6 +2725,8 @@ async def get_submittable_submissions(
                 "id": submission.id,
                 "team_id": submission.team_id,
                 "submitted_on": submission.submitted_on,
+                "score": submission.score,
+                "max_score": submittable.max_score,
                 "file": {
                     "file_url": submission.file_url,
                     "original_filename": submission.original_filename
@@ -2606,6 +2740,7 @@ async def get_submittable_submissions(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submissions: {str(e)}")
 
+# this is to delete a submittable and all its submissions, done by profs
 @app.delete("/submittables/{submittable_id}")
 async def delete_submittable(
     submittable_id: int,
@@ -2646,13 +2781,14 @@ async def delete_submittable(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting submittable: {str(e)}")
 
-
+# this is to update a submittable, done by profs
 @app.put("/submittables/{submittable_id}")
 async def update_submittable(
     submittable_id: int,
     title: str = FastAPIForm(...),
     deadline: str = FastAPIForm(...),
     description: str = FastAPIForm(...),
+    max_score: int = FastAPIForm(...),
     opens_at: Optional[str] = FastAPIForm(None),
     file: Optional[UploadFile] = None,
     db: Session = Depends(get_db),
@@ -2662,11 +2798,21 @@ async def update_submittable(
     try:
         # Basic validation
         try:
-            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
             if opens_at:
-                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                opens_at_dt = datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                # Validate that opens_at is before deadline
+                if opens_at_dt >= deadline_dt:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="opens_at must be before deadline"
+                    )
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format")
+            
+        # Validate max_score
+        if max_score <= 0:
+            raise HTTPException(status_code=400, detail="Maximum score must be greater than zero")
             
         existing_submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
         if not existing_submittable:
@@ -2677,6 +2823,7 @@ async def update_submittable(
         existing_submittable.opens_at = opens_at
         existing_submittable.deadline = deadline
         existing_submittable.description = description
+        existing_submittable.max_score = max_score
         
         # Handle file update if provided
         if file:
@@ -2712,6 +2859,7 @@ async def update_submittable(
             os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error updating submittable: {str(e)}")
 
+# this is to delete a submission, done by profs or the student who submitted        
 @app.delete("/submissions/{submission_id}")
 async def delete_submission(
     submission_id: int,
@@ -2748,14 +2896,50 @@ async def delete_submission(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting submission: {str(e)}")
 
-# __________________________________
-#           Assignments
-# __________________________________
-
-
-
-
-
+# this is to grade a submission, done by profs
+@app.put("/submissions/{submission_id}/grade")
+async def grade_submission(
+    submission_id: int,
+    score: int = FastAPIForm(...),
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_required)
+):
+    """Grade a submission (professors only)"""
+    try:
+        # Get the submission
+        submission = db.query(Submission).filter(Submission.id == submission_id).first()
+        if not submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+        
+        # Get the submittable to check max score
+        submittable = db.query(Submittable).filter(Submittable.id == submission.submittable_id).first()
+        if not submittable:
+            raise HTTPException(status_code=404, detail="Submittable not found")
+        
+        # Validate score
+        if score < 0:
+            raise HTTPException(status_code=400, detail="Score cannot be negative")
+        if score > submittable.max_score:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Score cannot exceed maximum score of {submittable.max_score}"
+            )
+        
+        # Update the submission score
+        submission.score = score
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={
+            "message": "Submission graded successfully",
+            "submission_id": submission.id,
+            "score": submission.score,
+            "max_score": submittable.max_score
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error grading submission: {str(e)}")
 
 ##Chatting Routes
 
