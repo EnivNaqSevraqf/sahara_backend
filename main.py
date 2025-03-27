@@ -34,7 +34,7 @@ from io import StringIO
 from fastapi.staticfiles import StaticFiles
 from typing import ForwardRef
 import base64
-
+import pandas as pd
 # Create uploads directory if it doesn't exist
 os.makedirs("uploads", exist_ok=True)
 
@@ -3274,3 +3274,109 @@ async def download_file(
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+
+
+from sqlalchemy.orm import Session
+
+@app.post("/teams/upload-csv/")
+async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a CSV file.")
+
+    try:
+        # Save the uploaded file to a temporary location
+        temp_file_path = f"temp_{file.filename}"
+        with open(temp_file_path, "wb") as temp_file:
+            temp_file.write(file.file.read())
+
+        # Read the CSV file using pandas
+        df = pd.read_csv(temp_file_path)
+
+        # Validate the CSV format
+        required_columns = ['team_name', 'member1', 'member2', 'member3', 'member4', 'member5', 'member6', 'member7', 'member8', 'member9', 'member10']
+        print(df.columns)
+        for _column_name in required_columns:
+            if _column_name not in df.columns:
+                raise HTTPException(status_code=400, detail=f"Invalid CSV format. Missing column: {_column_name}")
+
+        # Check if all members exist in the Users database and perform other checks
+        team_names = set()
+        members_set = list()
+        for _, row in df.iterrows():
+            team_name = row['team_name']
+            members = []
+            for i in range(1, 11):
+                members.append(row[f'member{i}'])
+
+            # members = [row[f'member{i}'] for i in range(1, 11) if pd.notna(row[f'member{i}'])]
+
+            if team_name in team_names:
+                raise HTTPException(status_code=400, detail=f"Invalid file: Duplicate team name '{team_name}' found.")
+            
+            team_names.add(team_name)
+
+            for member_name in members:
+                user = db.query(User).filter_by(username=member_name).first()
+                if not user:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' does not exist in the database.")
+                if user.team_id:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is already assigned to a team.")
+                if member_name in members_set:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is assigned to multiple teams.")
+            members_set.append(members)
+
+        # Get the highest team ID present in the database
+        # max_team_id = db.query(func.max(Team.id)).scalar() or 0
+
+
+        team_names = list(team_names)
+        print("Team names: ", team_names)
+        print("Members set:", members_set)
+        for i in range(len(team_names)):
+            team_name = team_names[i]
+            members = members_set[i]
+            team = Team(name = team_name)
+            db.add(team)
+            for member in members:
+                user = db.query(User).filter_by(username=member).first()
+                print("Over here")
+                if user:
+                    team.members.append(user)
+                    user.team_id = team.id
+        db.commit()
+
+        
+        # Process each row in the CSV file
+        # for _, row in 
+        #     team_name = row['team_name']
+        #     members = []
+        #     for i in range(10):
+        #         print(row[f'member{i}'])
+        #         members.append(row[f'member{i}'])
+        #     print(members)
+        #     # Create a new team
+        #     team = Team(name=team_name)
+        #     db.add(team)
+
+        #     # Add members to the team
+        #     for member_name in members:
+        #         user = db.query(User).filter_by(name=member_name).first()
+        #         if user:
+        #             # check if user is in team already
+        #             # if user not in team.members:
+        #             #     # check if user is already in a team
+        #             #     if user.team_id is None:
+        #             #         # Add the user to the team
+        #             team.members.append(user)
+        #             user.team_id = team.id  # Assign the team ID to the user
+        #             print("Added user to team:", user.name, "in team:", team.name)
+        # print("Committed the changes")
+        # db.commit()
+
+        # Clean up the temporary file
+        os.remove(temp_file_path)
+
+        return {"detail": "File uploaded and data saved successfully!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
