@@ -579,20 +579,20 @@ class GradeableCreateRequest(BaseModel):
     #due_date: str  # ISO 8601 format
     max_points: int
     
-    @validator('due_date')
-    def validate_due_date(cls, v):
-        try:
-            # Validate ISO 8601 format
-            datetime.fromisoformat(v.replace('Z', '+00:00'))
-            return v
-        except ValueError:
-            raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
+    # @validator('due_date')
+    # def validate_due_date(cls, v):
+    #     try:
+    #         # Validate ISO 8601 format
+    #         datetime.fromisoformat(v.replace('Z', '+00:00'))
+    #         return v
+    #     except ValueError:
+    #         raise ValueError("Invalid due date format. Use ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)")
             
-    @validator('max_points')
-    def validate_max_points(cls, v):
-        if v <= 0:
-            raise ValueError("Maximum points must be greater than zero")
-        return v
+    # @validator('max_points')
+    # def validate_max_points(cls, v):
+    #     if v <= 0:
+    #         raise ValueError("Maximum points must be greater than zero")
+    #     return v
 
 app = FastAPI()
 
@@ -1256,7 +1256,6 @@ async def create(
             title=title,
             content=description,
             url_name=file_name,
-            creator_id=1  # Default creator ID
         )
         
         db.add(new_announcement)
@@ -2480,17 +2479,16 @@ async def submit_file(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
-    """
 
-# submittables start here 
-# this is to submit file for a submittable, done by students
-@app.post("/submittables/{submittable_id}/submit")
-async def submit_file(
-    submittable_id: int,
-    file: UploadFile = File(...),  # Now accepts a single file
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
-):
+# # submittables start here 
+# # this is to submit file for a submittable, done by students
+# @app.post("/submittables/{submittable_id}/submit")
+# async def submit_file(
+#     submittable_id: int,
+#     file: UploadFile = File(...),  # Now accepts a single file
+#     db: Session = Depends(get_db),
+#     token: str = Depends(prof_or_ta_required)
+# ):
     """
     Submit a file for a submittable.
     Only one submission per submittable per team is allowed.
