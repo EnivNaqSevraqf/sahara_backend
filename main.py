@@ -193,6 +193,7 @@ class User(Base):
     gradeable_scores = relationship("GradeableScores", back_populates="user")
     submittables = relationship("Submittable", back_populates="creator", lazy="joined")
     assignables = relationship("Assignable", back_populates="creator", lazy="joined")
+    assignments = relationship("Assignment", back_populates="user")
     messages = relationship("Message", back_populates="sender")
     
     @validates('skills')
