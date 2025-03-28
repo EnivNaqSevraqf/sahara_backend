@@ -5386,8 +5386,8 @@ async def get_assignable_assignments(
         raise HTTPException(status_code=500, detail=f"Error fetching assignments: {str(e)}")
 
 # this is to delete a assignable and all its assignments, done by profs
-@app.delete("/assignables/{submittable_id}")
-async def delete_submittable(
+@app.delete("/assignables/{assignable_id}")
+async def delete_assignable(
     assignable_id: int,
     db: Session = Depends(get_db),
     token: str = Depends(prof_or_ta_required)
