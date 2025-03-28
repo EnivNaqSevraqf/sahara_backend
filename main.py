@@ -1520,8 +1520,8 @@ class AllocationResponse(BaseModel):
 
 def get_allocation(n: int, db: Session):
     # Get all teams and TAs
-    teams = db.query(models.Team).all()
-    tas = db.query(models.User).filter(models.User.role_id == 2).all()
+    teams = db.query(Team).all()
+    tas = db.query(User).filter(User.role_id == 3).all()
     
     if not tas:
         raise HTTPException(status_code=400, detail="No TAs available")
@@ -1541,13 +1541,13 @@ def get_allocation(n: int, db: Session):
     # Calculate skill matches for all team-TA pairs
     for team in teams:
         # Get team's required skills
-        team_skills = set([skill[0] for skill in db.query(models.TeamSkill.skill_id)
-            .filter(models.TeamSkill.team_id == team.id).all()])
+        team_skills = set([skill[0] for skill in db.query(TeamSkill.skill_id)
+            .filter(TeamSkill.team_id == team.id).all()])
         
         for ta in tas:
             # Get TA's skills
-            ta_skills = set([skill[0] for skill in db.query(models.UserSkill.skill_id)
-                .filter(models.UserSkill.user_id == ta.id).all()])
+            ta_skills = set([skill[0] for skill in db.query(UserSkill.skill_id)
+                .filter(UserSkill.user_id == ta.id).all()])
             
             # Calculate skill match score
             match_score = len(team_skills.intersection(ta_skills))
