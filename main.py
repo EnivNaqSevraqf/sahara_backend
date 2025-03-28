@@ -4256,7 +4256,7 @@ async def submit_file(
     # Check if user already has a submission
     user = db.query(User).filter(User.id == current_user["user"].id).first()
     existing_assignment = db.query(Assignment).filter(
-        Assignment.user_id == user.user_id,
+        Assignment.user_id == user.id,
         Assignment.assignable_id == assignable_id
     ).first()
 
@@ -4291,7 +4291,7 @@ async def submit_file(
 
     # Create submission record
     assignment = Assignment(
-        user_id=current_user.user_id,
+        user_id=user.id,
         file_url=file_path,
         original_filename=file.filename,
         assignable_id=assignable_id,
@@ -4337,7 +4337,7 @@ async def download_assignment(
             pass
         elif role == RoleType.STUDENT:
             # Students can only download their submission
-            if not user.user_id or user.user_id != assignment.user_id:
+            if not user.id or user.id != assignment.user_id:
                 raise HTTPException(status_code=403, detail="Not authorized to download this submission")
         else:
             raise HTTPException(status_code=403, detail="Not authorized to download submissions")
@@ -4372,8 +4372,8 @@ async def get_assignables(
         # Get user's team submissions
         user = current_user["user"]
         user_assignments = {}
-        if user.user_id:
-            assignments = db.query(Assignment).filter(Assignment.user_id == user.user_id).all()
+        if user.id:
+            assignments = db.query(Assignment).filter(Assignment.user_id == user.id).all()
             user_assignments = {s.assignable_id: s for s in assignments}
         
         # Helper function to format submittable
@@ -4769,7 +4769,7 @@ async def delete_assignment(
         user = current_user["user"]
         if current_user["role"] == RoleType.STUDENT:
             # For students, check if they belong to the team that submitted
-            if user.user_id != assignment.user_id:
+            if user.id != assignment.user_id:
                 raise HTTPException(status_code=403, detail="You can only delete your own submissions")
         
         # Delete the submission file if it exists
