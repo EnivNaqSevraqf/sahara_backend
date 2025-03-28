@@ -2214,6 +2214,109 @@ def create_skill( skill_req: SkillRequest):
     return {"bgColor" : skill_req.bgColor}
 
 
+@app.get("/teams")
+async def get_student_team(
+    current_user: dict[User, str] = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get student's team and member data with feedback submission validation"""
+    try:
+        user = current_user["user"]
+        
+        # Check if user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only students can access this endpoint"
+            )
+
+        # Check if user has been assigned to a team
+        if not user.teams:
+            raise HTTPException(
+                status_code=404,
+                detail="You have not been assigned to a team"
+            )
+            
+        team = user.teams[0]  # Get the student's team
+
+        # Get all team members including the current user
+        team_members = [
+            {
+                "id": member.id,
+                "name": member.name,
+                "email": member.email,
+                "is_current_user": member.id == user.id
+            }
+            for member in team.members
+        ]
+
+        skills = team.skills
+        skill_data = []
+        for skill in skills:
+            skill_data.append({
+                "id": skill.id,
+                "name": skill.name,
+                "bgColor": skill.bgColor,
+                "color": skill.color,
+                "icon": skill.icon
+            })
+        all_skills = db.query(Skill).all()
+        all_skills_data = []
+        for skill in all_skills:
+            all_skills_data.append({
+                "id": skill.id,
+                "name": skill.name,
+                "bgColor": skill.bgColor,
+                "color": skill.color,
+                "icon": skill.icon
+            })
+        return {
+            "team_id": team.id,
+            "team_name": team.name,
+            "members": team_members,
+            "skills": skill_data,
+            "all_skills":  all_skills
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.put("/teams/skills")
+def update_team_skills(
+    skills: List[int],
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Update team skills
+    """
+    try:
+    # if 1:
+        user = current_user["user"]
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(status_code=403, detail="Only students can access this endpoint")
+        
+        if not user.teams:
+            raise HTTPException(status_code=404, detail="User has no team assigned")
+        team = user.teams[0]  # Get the student's team
+        if not team:
+            raise HTTPException(status_code=404, detail="Team not found")
+        
+        # Clear existing skills and assign new ones
+        team.skills = []
+        for skill_id in skills:
+            skill = db.query(Skill).filter(Skill.id == skill_id).first()
+            if skill:
+                team.skills.append(skill)
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={"message": "Team skills updated successfully"})
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/teams/FormedTeams")
 def setFormedTeams(db: Session = Depends(get_db)):
     teams = db.query(Team).all()
@@ -2512,12 +2615,13 @@ async def submit_file(
 
     # Get the user's team
     user = db.query(User).filter(User.id == current_user["user"].id).first()
-    if not user or not user.team_id:
+    team = user.teams[0] if user.teams else None
+    if not user or not team:
         raise HTTPException(status_code=400, detail="User must be part of a team to submit")
 
     # Check if team already has a submission
     existing_submission = db.query(Submission).filter(
-        Submission.team_id == user.team_id,
+        Submission.team_id == team.id,
         Submission.submittable_id == submittable_id
     ).first()
 
@@ -2552,7 +2656,7 @@ async def submit_file(
 
     # Create submission record
     submission = Submission(
-        team_id=user.team_id,
+        team_id=team.id,
         file_url=file_path,
         original_filename=file.filename,
         submittable_id=submittable_id,
@@ -2598,7 +2702,8 @@ async def download_submission(
             pass
         elif role == RoleType.STUDENT:
             # Students can only download their team's submission
-            if not user.team_id or user.team_id != submission.team_id:
+            team = user.teams[0] if user.teams else None
+            if not team.id or team.id != submission.team_id:
                 raise HTTPException(status_code=403, detail="Not authorized to download this submission")
         else:
             raise HTTPException(status_code=403, detail="Not authorized to download submissions")
@@ -2632,9 +2737,17 @@ async def get_submittables(
         
         # Get user's team submissions
         user = current_user["user"]
+        team = user.teams[0] if user.teams else None
+        if team is None:
+            return {
+                "team_id": None,
+                "upcoming": [],
+                "open": [],
+                "closed": []
+            }
         team_submissions = {}
-        if user.team_id:
-            submissions = db.query(Submission).filter(Submission.team_id == user.team_id).all()
+        if team.id:
+            submissions = db.query(Submission).filter(Submission.team_id == team.id).all()
             team_submissions = {s.submittable_id: s for s in submissions}
         
         # Helper function to format submittable
@@ -2678,6 +2791,7 @@ async def get_submittables(
                 open_submittables.append(formatted)
 
         return {
+            "team_id": team.id,
             "upcoming": upcoming,
             "open": open_submittables,
             "closed": closed
@@ -3028,9 +3142,10 @@ async def delete_submission(
         
         # Check if user is professor or the student who submitted
         user = current_user["user"]
+        team = user.teams[0] if user.teams else None
         if current_user["role"] == RoleType.STUDENT:
             # For students, check if they belong to the team that submitted
-            if user.team_id != submission.team_id:
+            if team.id != submission.team_id:
                 raise HTTPException(status_code=403, detail="You can only delete your own submissions")
         
         # Delete the submission file if it exists
@@ -4633,10 +4748,10 @@ async def get_assignable_assignments(
         for assignment in assignments:
             assignment_data = {
                 "id": assignment.id,
-                "team_id": assignment.team_id,
+                "team_id": assignment.user_id,
                 "submitted_on": assignment.submitted_on,
                 "score": assignment.score,
-                "max_score": assignment.max_score,
+                "max_score": assignable.max_score,
                 "file": {
                     "file_url": assignment.file_url,
                     "original_filename": assignment.original_filename
@@ -4838,7 +4953,7 @@ async def grade_assignment(
             "message": "Submission graded successfully",
             "assignment_id": assignment.id,
             "score": assignment.score,
-            "max_score": assignment.max_score
+            "max_score": assignable.max_score
         })
     except HTTPException as he:
         raise he
