@@ -115,8 +115,8 @@ class Submittable(Base):
     def validate_creator(self, key, value):
         with SessionLocal() as db:
             user = db.query(User).filter_by(id=value).first()
-            if user and user.role.role != RoleType.PROF:
-                raise ValueError("Only professors can create submittables.")
+            if user and user.role.role == RoleType.STUDENT:
+                raise ValueError("Only professors or TAs can create submittables.")
         return value
 
 class Submission(Base):
@@ -2407,7 +2407,7 @@ async def download_submission(
         role = current_user["role"]
         
         # Check permissions
-        if role == RoleType.PROF:
+        if role == RoleType.PROF or role == RoleType.TA:
             # Professors can download any submission
             pass
         elif role == RoleType.STUDENT:
@@ -2542,7 +2542,7 @@ async def create_submittable(
     opens_at: Optional[str] = FastAPIForm(None),
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db),
-    token: str = Depends(prof_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """Create a new submittable with an optional reference file"""
     try:
@@ -2683,7 +2683,7 @@ async def get_submittable_submissions(
 ):
     """Get all submissions for a submittable (professors only)"""
     try:
-        if current_user["role"] != RoleType.PROF:
+        if current_user["role"] == RoleType.STUDENT:
             raise HTTPException(status_code=403, detail="Only professors can view all submissions")
         
         submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
@@ -2718,7 +2718,7 @@ async def get_submittable_submissions(
 async def delete_submittable(
     submittable_id: int,
     db: Session = Depends(get_db),
-    token: str = Depends(prof_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """Delete a submittable and all its submissions (professors only)"""
     try:
@@ -2761,11 +2761,10 @@ async def update_submittable(
     title: str = FastAPIForm(...),
     deadline: str = FastAPIForm(...),
     description: str = FastAPIForm(...),
-    max_score: int = FastAPIForm(...),
     opens_at: Optional[str] = FastAPIForm(None),
     file: Optional[UploadFile] = None,
     db: Session = Depends(get_db),
-    token: str = Depends(prof_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """Update a submittable (professors only)"""
     try:
@@ -2783,9 +2782,6 @@ async def update_submittable(
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format")
             
-        # Validate max_score
-        if max_score <= 0:
-            raise HTTPException(status_code=400, detail="Maximum score must be greater than zero")
             
         existing_submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
         if not existing_submittable:
@@ -2796,7 +2792,6 @@ async def update_submittable(
         existing_submittable.opens_at = opens_at
         existing_submittable.deadline = deadline
         existing_submittable.description = description
-        existing_submittable.max_score = max_score
         
         # Handle file update if provided
         if file:
@@ -2847,7 +2842,7 @@ async def delete_submission(
         
         # Check if user is professor or the student who submitted
         user = current_user["user"]
-        if current_user["role"] != RoleType.PROF:
+        if current_user["role"] == RoleType.STUDENT:
             # For students, check if they belong to the team that submitted
             if user.team_id != submission.team_id:
                 raise HTTPException(status_code=403, detail="You can only delete your own submissions")
@@ -2875,7 +2870,7 @@ async def grade_submission(
     submission_id: int,
     score: int = FastAPIForm(...),
     db: Session = Depends(get_db),
-    token: str = Depends(prof_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """Grade a submission (professors only)"""
     try:
