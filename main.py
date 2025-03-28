@@ -1633,33 +1633,45 @@ async def create_match(n: int, db: Session = Depends(get_db)):
 @app.get("/match", response_model=dict)
 async def get_match(db: Session = Depends(get_db)):
     try:
-        results = db.execute(text("""
-            SELECT 
-                t.id as team_id,
-                t.name as team_name,
-                u.id as ta_id,
-                u.name as ta_name
-            FROM teams t
-            JOIN team_tas tt ON t.id = tt.team_id
-            JOIN users u ON tt.ta_id = u.id
-            ORDER BY t.id, u.id
-        """)).fetchall()
+        # Get all teams with their skills and TAs
+        teams = db.query(Team).all()
+        results = []
         
-        teams_dict = {}
-        for row in results:
-            team_id = row[0]
-            if team_id not in teams_dict:
-                teams_dict[team_id] = {
-                    "team_id": team_id,
-                    "team_name": row[1],
-                    "tas": []
-                }
-            teams_dict[team_id]["tas"].append({
-                "ta_id": row[2],
-                "ta_name": row[3]
+        for team in teams:
+            # Get team skills
+            skills = db.query(Skill).join(team_skills).filter(team_skills.c.team_id == team.id).all()
+            
+            # Get assigned TAs
+            tas = (
+                db.query(User)
+                .join(Team_TA, User.id == Team_TA.ta_id)
+                .filter(Team_TA.team_id == team.id)
+                .all()
+            )
+            
+            results.append({
+                "team_id": team.id,
+                "team_name": team.name,
+                "skills": [
+                    {
+                        "id": skill.id,
+                        "name": skill.name,
+                        "bgColor": skill.bgColor,
+                        "color": skill.color,
+                        "icon": skill.icon
+                    }
+                    for skill in skills
+                ],
+                "tas": [
+                    {
+                        "id": ta.id,
+                        "name": ta.name
+                    }
+                    for ta in tas
+                ]
             })
         
-        return {"teams": list(teams_dict.values())}
+        return {"teams": results}
     
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -4833,3 +4845,56 @@ async def grade_assignment(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error grading assignment: {str(e)}")
+
+class UpdateTAsRequest(BaseModel):
+    ta_ids: List[int]
+
+@app.post("/teams/{team_id}/update-tas")
+async def update_team_tas(
+    team_id: int,
+    request: UpdateTAsRequest,
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """Update TA assignments for a specific team"""
+    try:
+        # Verify team exists
+        team = db.query(Team).filter(Team.id == team_id).first()
+        if not team:
+            raise HTTPException(status_code=404, detail="Team not found")
+
+        # Verify all TAs exist and are actually TAs
+        tas = db.query(User).filter(
+            User.id.in_(request.ta_ids),
+            User.role_id == 3  # role_id 3 is for TAs
+        ).all()
+
+        if len(tas) != len(request.ta_ids):
+            raise HTTPException(
+                status_code=400,
+                detail="One or more selected users are not TAs or do not exist"
+            )
+
+        # Delete existing TA assignments for this team
+        db.query(Team_TA).filter(Team_TA.team_id == team_id).delete()
+
+        # Create new TA assignments
+        for ta_id in request.ta_ids:
+            new_assignment = Team_TA(
+                team_id=team_id,
+                ta_id=ta_id
+            )
+            db.add(new_assignment)
+
+        db.commit()
+        return {"message": "TA assignments updated successfully"}
+
+    except HTTPException as he:
+        db.rollback()
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error updating TA assignments: {str(e)}"
+        )
