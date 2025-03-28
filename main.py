@@ -3023,6 +3023,65 @@ async def get_submittables(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submittables: {str(e)}")
 
+@app.get("/submittables/all")
+async def get_all_submittables(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all submittables categorized by status for professors or TAs"""
+    try:
+        # Check if the user is a professor or TA
+        if current_user["role"] not in [RoleType.PROF, RoleType.TA]:
+            raise HTTPException(
+                status_code=403,
+                detail="Only professors or TAs can access this endpoint"
+            )
+
+        # Fetch all submittables
+        submittables = db.query(Submittable).all()
+
+        # Categorize submittables
+        now = datetime.now(timezone.utc)
+        upcoming = []
+        open_submittables = []
+        closed = []
+
+        for submittable in submittables:
+            opens_at = datetime.fromisoformat(submittable.opens_at) if submittable.opens_at else None
+            deadline = datetime.fromisoformat(submittable.deadline)
+
+            formatted_submittable = {
+                "id": submittable.id,
+                "title": submittable.title,
+                "description": submittable.description,
+                "opens_at": submittable.opens_at,
+                "deadline": submittable.deadline,
+                "max_score": submittable.max_score,
+                "created_at": submittable.created_at,
+                "reference_files": [{
+                    "file_url": submittable.file_url,
+                    "original_filename": submittable.original_filename
+                }] if submittable.file_url else []
+            }
+
+            if opens_at and now < opens_at:
+                upcoming.append(formatted_submittable)
+            elif now > deadline:
+                closed.append(formatted_submittable)
+            else:
+                open_submittables.append(formatted_submittable)
+
+        # Return categorized submittables
+        return {
+            "upcoming": upcoming,
+            "open": open_submittables,
+            "closed": closed
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching submittables: {str(e)}")
+    
 # this is to download the reference file for a submittable, done by students and profs
 @app.get("/submittables/{submittable_id}/reference-files/download")
 async def download_reference_file(
@@ -5360,7 +5419,7 @@ async def delete_submittable(
         raise HTTPException(status_code=500, detail=f"Error deleting assignable: {str(e)}")
     
 # this is to update a assignable, done by profs
-@app.put("/assignable/{assignable_id}")
+@app.put("/assignables/{assignable_id}")
 async def update_assignable(
     assignable_id: int,
     title: str = FastAPIForm(...),
