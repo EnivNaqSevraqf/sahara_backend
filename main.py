@@ -2500,12 +2500,13 @@ async def submit_file(
 
     # Get the user's team
     user = db.query(User).filter(User.id == current_user["user"].id).first()
-    if not user or not user.team_id:
+    team = user.teams[0] if user.teams else None
+    if not user or not team.id:
         raise HTTPException(status_code=400, detail="User must be part of a team to submit")
 
     # Check if team already has a submission
     existing_submission = db.query(Submission).filter(
-        Submission.team_id == user.team_id,
+        Submission.team_id == team.id,
         Submission.submittable_id == submittable_id
     ).first()
 
@@ -2540,7 +2541,7 @@ async def submit_file(
 
     # Create submission record
     submission = Submission(
-        team_id=user.team_id,
+        team_id=team.id,
         file_url=file_path,
         original_filename=file.filename,
         submittable_id=submittable_id,
@@ -2586,7 +2587,8 @@ async def download_submission(
             pass
         elif role == RoleType.STUDENT:
             # Students can only download their team's submission
-            if not user.team_id or user.team_id != submission.team_id:
+            team = user.teams[0] if user.teams else None
+            if not team.id or team.id != submission.team_id:
                 raise HTTPException(status_code=403, detail="Not authorized to download this submission")
         else:
             raise HTTPException(status_code=403, detail="Not authorized to download submissions")
@@ -2620,9 +2622,17 @@ async def get_submittables(
         
         # Get user's team submissions
         user = current_user["user"]
+        team = user.teams[0] if user.teams else None
+        if team is None:
+            return {
+                "team_id": None,
+                "upcoming": [],
+                "open": [],
+                "closed": []
+            }
         team_submissions = {}
-        if user.team_id:
-            submissions = db.query(Submission).filter(Submission.team_id == user.team_id).all()
+        if team.id:
+            submissions = db.query(Submission).filter(Submission.team_id == team.id).all()
             team_submissions = {s.submittable_id: s for s in submissions}
         
         # Helper function to format submittable
@@ -2666,6 +2676,7 @@ async def get_submittables(
                 open_submittables.append(formatted)
 
         return {
+            "team_id": team.id,
             "upcoming": upcoming,
             "open": open_submittables,
             "closed": closed
@@ -3016,9 +3027,10 @@ async def delete_submission(
         
         # Check if user is professor or the student who submitted
         user = current_user["user"]
+        team = user.teams[0] if user.teams else None
         if current_user["role"] == RoleType.STUDENT:
             # For students, check if they belong to the team that submitted
-            if user.team_id != submission.team_id:
+            if team.id != submission.team_id:
                 raise HTTPException(status_code=403, detail="You can only delete your own submissions")
         
         # Delete the submission file if it exists
