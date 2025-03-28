@@ -2521,11 +2521,14 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
         #     raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
         
         # Process each row in CSV
+        unadded_users = []
         for row_num, row in enumerate(csv_reader, start=2):
             try:
-                # Extract and validate username
-                username = row['username'].strip()
-                if not username:
+                # # Extract and validate username
+                # username = row['username'].strip()
+                # Extract and validate roll no
+                roll_no = row['RollNo'].strip()
+                if not roll_no:
                     continue
                 
                 # Extract and validate score
@@ -2534,13 +2537,17 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
                     if score < 0 or score > max_points:
                         raise ValueError(f"Score must be between 0 and {max_points}")
                 except ValueError:
+                    # TODO add the code for skipped these users
+                    continue
                     raise ValueError(f"Invalid score format in row {row_num}")
                 
-                # Get user ID from username
-                user = db.query(User).filter(User.username == username).first()
+                # Get user ID from roll number
+                user = db.query(User).filter(User.id == roll_no).first()
+            
                 if not user:
-                    raise ValueError(f"User with username '{username}' not found")
-                print(user.id)
+                    unadded_users.append(user)
+                    continue
+                print("Added user id:", user.id)
                 scores.append({
                     'user_id': user.id,
                     'gradeable_id': gradeable_id,
@@ -4131,7 +4138,83 @@ from sqlalchemy.orm import Session
 async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Invalid file format. Please upload a CSV file.")
+        # Read the CSV file and extract data
+    try:
+        contents = await file.read()
+        text_contents = contents.decode('utf-8')
+        df = pd.read_csv(StringIO(text_contents))
+        
+        # Validate required columns
+        required_columns = ['RollNo', 'TeamID']
+        for column in required_columns:
+            if column not in df.columns:
+                raise HTTPException(status_code=400, detail=f"Missing required column: {column}")
+        
+        # Group students by team ID
+        team_to_users = {}
+        for _, row in df.iterrows():
+            roll_no = row['RollNo']
+            team_id = row['TeamID']
+            
+            # Skip rows with empty team IDs
+            if pd.isna(team_id) or pd.isna(roll_no):
+                continue
+            
+            team_id = int(team_id)
+            if team_id not in team_to_users:
+                team_to_users[team_id] = []
+            
+            # Find the user with this roll number
+            user = db.query(User).filter(User.id == roll_no).first()
+            if not user:
+                raise HTTPException(status_code=400, detail=f"User with Roll No {roll_no} not found")
+            
+            team_to_users[team_id].append(user)
+        
+        # Create or update teams
+        created_teams = []
+        updated_teams = []
+        for team_id, users in team_to_users.items():
+            print("Handling team id:", team_id)
+            # Check if team already exists
+            team = db.query(Team).filter(Team.id == team_id).first()
+            
+            if team:
+                # Update existing team
+                for user in users:
+                    if user not in team.members:
+                        team.members.append(user)
+                        user.team_id = team.id
+                updated_teams.append(team_id)
+            else:
+                # Create new team
+                team = Team(id=team_id, name=f"Team {team_id}")
+                db.add(team)
+                db.flush()  # Get the ID without committing
+                
+                for user in users:
+                    team.members.append(user)
+                    user.team_id = team.id
+                created_teams.append(team_id)
+        
+        db.commit()
+        
+        return {
+            "message": "Teams created and updated successfully",
+            "created_teams": created_teams,
+            "updated_teams": updated_teams,
+            "total_teams": len(team_to_users),
+            "total_students_assigned": sum(len(users) for users in team_to_users.values())
+        }
+    except HTTPException as e:
+        db.rollback()
+        raise e
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
 
+
+    # outdated code
     try:
         # Save the uploaded file to a temporary location
         temp_file_path = f"temp_{file.filename}"
