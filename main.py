@@ -34,7 +34,11 @@ from io import StringIO
 from fastapi.staticfiles import StaticFiles
 from typing import ForwardRef
 import base64
-
+import pandas as pd
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formatdate
 # Create uploads directory if it doesn't exist
 os.makedirs("uploads", exist_ok=True)
 
@@ -105,9 +109,9 @@ class Submittable(Base):
     description = Column(String, nullable=False)
     file_url = Column(String, nullable=False)  # URL path to the reference file
     original_filename = Column(String, nullable=False)
+    max_score = Column(Integer, nullable=False)  # Maximum possible score for this submittable
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
     creator = relationship("User", back_populates="submittables")
     submissions = relationship("Submission", back_populates="submittable")
 
@@ -115,8 +119,8 @@ class Submittable(Base):
     def validate_creator(self, key, value):
         with SessionLocal() as db:
             user = db.query(User).filter_by(id=value).first()
-            if user and user.role.role != RoleType.PROF:
-                raise ValueError("Only professors can create submittables.")
+            if user and user.role.role == RoleType.STUDENT:
+                raise ValueError("Only professors or TAs can create submittables.")
         return value
 
 class Submission(Base):
@@ -127,6 +131,7 @@ class Submission(Base):
     file_url = Column(String, nullable=False)  # URL path to the reference file
     original_filename = Column(String, nullable=False)
     submittable_id = Column(Integer, ForeignKey("submittables.id"), nullable=False)
+    score = Column(Integer, nullable=True)  # Score received for this submission
 
     team = relationship("Team", back_populates="submissions")
     submittable = relationship("Submittable", back_populates="submissions")
@@ -207,7 +212,7 @@ class Announcement(Base):
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
     title = Column(String, nullable=False)
-    content = Column(String, nullable=False)  # Changed from JSONB to String
+    content = Column(String, nullable=False)  # Supports Markdown formatting for rich text
     url_name = Column(String, unique=True, nullable=True)
     
     @validates("creator_id")
@@ -354,6 +359,38 @@ class Message(Base):
     sender = relationship("User", back_populates="messages")
     channel = relationship("Channel", back_populates="messages")
 
+class FeedbackSubmission(Base):
+    __tablename__ = "feedback_submissions"
+    id = Column(Integer, primary_key=True)
+    submitter_id = Column(Integer, ForeignKey("users.id"))
+    team_id = Column(Integer, ForeignKey("teams.id"))
+    submitted_at = Column(DateTime, default=datetime.now(timezone.utc))
+    submitter = relationship("User", foreign_keys=[submitter_id])
+    team = relationship("Team")
+    details = relationship("FeedbackDetail", back_populates="submission")
+
+class FeedbackDetail(Base):
+    __tablename__ = "feedback_details"
+    id = Column(Integer, primary_key=True)
+    submission_id = Column(Integer, ForeignKey("feedback_submissions.id"))
+    member_id = Column(Integer, ForeignKey("users.id"))
+    contribution = Column(Float)
+    remarks = Column(Text)
+    submission = relationship("FeedbackSubmission", back_populates="details")
+    member = relationship("User", foreign_keys=[member_id])
+
+# Add these Pydantic models for request validation
+class FeedbackDetailRequest(BaseModel):
+    member_id: int
+    contribution: float
+    remarks: str
+
+class FeedbackSubmissionRequest(BaseModel):
+    team_id: int
+    details: List[FeedbackDetailRequest]
+
+
+
 class TeamSkill(Base):
     __tablename__ = "team_skills"
 
@@ -391,6 +428,28 @@ class FeedbackDetailRequest(BaseModel):
 class FeedbackSubmissionRequest(BaseModel):
     team_id: int
     details: List[FeedbackDetailRequest]
+
+# Define OTP database table
+class UserOTP(Base):
+    __tablename__ = "user_otps"
+    
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    hashed_otp = Column(String, nullable=False)
+    expires_at = Column(String, nullable=False)  # ISO 8601 format
+    
+    # Relationship with User
+    user = relationship("User", backref="otp_record")
+
+# Define OTP database table
+class UserOTP(Base):
+    __tablename__ = "user_otps"
+    
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    hashed_otp = Column(String, nullable=False)
+    expires_at = Column(String, nullable=False)  # ISO 8601 format
+    
+    # Relationship with User
+    user = relationship("User", backref="otp_record")
 
 def get_db():
     db = SessionLocal()
@@ -561,7 +620,6 @@ class FormCreateRequest(BaseModel):
 
 class FormResponseSubmit(BaseModel):
     form_id: int
-    user_id: int
     response_data: str  # JSON serialized response data
 
 class UserIdRequest(BaseModel):
@@ -638,6 +696,23 @@ with engine.connect() as connection:
             IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
                           WHERE table_name = 'submittables' AND column_name = 'original_filename') THEN
                 ALTER TABLE submittables ADD COLUMN original_filename VARCHAR;
+            END IF;
+
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                          WHERE table_name = 'submittables' AND column_name = 'max_score') THEN
+                ALTER TABLE submittables ADD COLUMN max_score INTEGER NOT NULL DEFAULT 100;
+            END IF;
+        END $$;
+    """))
+    connection.commit()
+
+    # Add missing columns to submissions table if they don't exist
+    connection.execute(text("""
+        DO $$ 
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns 
+                          WHERE table_name = 'submissions' AND column_name = 'score') THEN
+                ALTER TABLE submissions ADD COLUMN score INTEGER;
             END IF;
         END $$;
     """))
@@ -936,6 +1011,37 @@ def create_prof(
         "temporary_password": temporary_password
     }
 
+def extract_students(content: str) -> List[dict]:
+    """
+    Extracts student data from the CSV content.
+    Returns a list of dictionaries with student data.
+    """
+    reader = csv.DictReader(content.splitlines())
+    students = []
+    expected_headers = ['RollNo','Name', 'Email']
+    headers = reader.fieldnames
+
+    for header in expected_headers:
+        if header not in headers:
+            raise CSVFormatError(f"Missing header: {header}")
+    
+    for row in reader:
+        student = {
+            'RollNo': row.get('RollNo'),
+            'Name': row.get('Name'),
+            'Email': row.get('Email'),
+            
+        }
+        students.append(student)
+    
+
+    for student in students:
+        if not student['RollNo'] or not student['Name'] or not student['Email']:
+            print(student)
+            raise CSVFormatError("All fields must be filled for each student.")
+    
+    return students
+
 """
 CSV File Format for Student Upload:
 Expected columns:
@@ -972,10 +1078,10 @@ async def upload_students(
     try:
         # Read file content
         content = await file.read()
-        content_str = content.decode('utf-16')
+        content_str = content.decode('utf-8')
         
         try:
-            students = extract_student_data_from_content(content_str)
+            students = extract_students(content_str)
         except CSVFormatError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -996,8 +1102,8 @@ async def upload_students(
         # Process each student
         for student in students:
             try:
-                username = student['Username']
-                
+                # extract username from email
+                username = student['Email'].split('@')[0]
                 # Check if username already exists
                 existing_user = db.query(User).filter(User.username == username).first()
                 if existing_user:
@@ -1009,7 +1115,12 @@ async def upload_students(
                 hashed_password = create_hashed_password(temp_password)
                 
                 # Create new student
+                if 'RollNo' in student:
+                    user_id = student['RollNo']
+                else:
+                    user_id = None
                 new_student = User(
+                    id=user_id,
                     name=student['Name'],
                     email=student['Email'],
                     username=username,
@@ -1212,7 +1323,7 @@ class Show(BaseModel):
     creator_id: int
     created_at: str
     title: str
-    content: str
+    content: str  # Contains Markdown formatted text
     url_name: Optional[str] = None
     creator_name: Optional[str] = None
 
@@ -1300,10 +1411,25 @@ async def download_announcement_file(
         if not os.path.exists(file_path):
             raise HTTPException(status_code=404, detail="File not found")
         
+        # Determine content type based on file extension
+        file_extension = os.path.splitext(announcement.url_name)[1].lower()
+        content_type = {
+            '.pdf': 'application/pdf',
+            '.doc': 'application/msword',
+            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            '.jpg': 'image/jpeg',
+            '.jpeg': 'image/jpeg',
+            '.png': 'image/png',
+            '.txt': 'text/plain'
+        }.get(file_extension, 'application/octet-stream')
+        
         return FileResponse(
             file_path,
             filename=announcement.url_name,
-            media_type='application/octet-stream'
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'attachment; filename="{announcement.url_name}"'
+            }
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1649,12 +1775,15 @@ def create_form_db(form_data: FormCreateRequest, db: Session) -> Dict[str, Any]:
         print(f"error creating form: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating form: {str(e)}")
 
-def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Dict[str, Any]:
+def store_form_response_db(response_data: FormResponseSubmit, 
+                            user_id: int,  # Current user information
+                           db: Session = Depends(get_db)):
     """
     Store a user's response to a form
     
     Parameters:
     - response_data: FormResponseSubmit object
+    - user_id: Current user information
     - db: Database session
     
     Returns:
@@ -1674,7 +1803,7 @@ def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Di
         # Check if user has already responded
         existing_response = db.query(FormResponse).filter(
             FormResponse.form_id == response_data.form_id,
-            FormResponse.user_id == response_data.user_id
+            FormResponse.user_id == user_id
         ).first()
         
         if existing_response:
@@ -1686,7 +1815,7 @@ def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Di
             # Add new response
             new_response = FormResponse(
                 form_id=response_data.form_id,
-                user_id=response_data.user_id,
+                user_id=user_id,
                 response_data=response_data.response_data,
                 submitted_at=datetime.now(timezone.utc).isoformat()
             )
@@ -1698,7 +1827,6 @@ def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Di
         return {
             "message": message,
             "form_id": response_data.form_id,
-            "user_id": response_data.user_id
         }
     except HTTPException as he:
         db.rollback()
@@ -1731,8 +1859,6 @@ def get_form_by_id_db(form_id: int, db: Session) -> Dict[str, Any]:
             "created_at": form.created_at,
             "deadline": form.deadline,
             "form_json": json.loads(form.form_json) if hasattr(form, "form_json") else None,
-            "target_type": form.target_type.value,
-            "target_id": form.target_id
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving form: {str(e)}")
@@ -1841,9 +1967,9 @@ async def api_create_form(form_data: FormCreateRequest, db: Session = Depends(ge
     return JSONResponse(status_code=201, content=result)
 
 @app.post("/api/forms/submit")
-async def api_submit_response(form_response: FormResponseSubmit, db: Session = Depends(get_db)):
+async def api_submit_response(form_response: FormResponseSubmit, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Submit a response to a form"""
-    result = store_form_response_db(form_response, db)
+    result = store_form_response_db(form_response, user["user"].id, db)
     return JSONResponse(status_code=201, content=result)
 
 @app.get("/api/forms/{form_id}")
@@ -2460,7 +2586,8 @@ async def create_gradeable(
 #     return scores
 
 
-
+# submittables start here 
+# this is to submit file for a submittable, done by students
 @app.post("/submittables/{submittable_id}/submit")
 async def submit_file(
     submittable_id: int,
@@ -2522,7 +2649,8 @@ async def submit_file(
         team_id=user.team_id,
         file_url=file_path,
         original_filename=file.filename,
-        submittable_id=submittable_id
+        submittable_id=submittable_id,
+        score=None  # Initialize score as None since it hasn't been graded yet
     )
 
     try:
@@ -2532,7 +2660,9 @@ async def submit_file(
         return {
             "message": "File submitted successfully",
             "submission_id": submission.id,
-            "original_filename": submission.original_filename
+            "original_filename": submission.original_filename,
+            "max_score": submittable.max_score,  # Include max_score in response
+            "score": submission.score  # Include current score (will be None for new submissions)
         }
     except Exception as e:
         # If database operation fails, delete the uploaded file
@@ -2540,6 +2670,7 @@ async def submit_file(
             os.remove(file_path)
         raise HTTPException(status_code=500, detail=f"Failed to create submission record: {str(e)}")
 
+# this is to download the file for a submission, done by profs and students
 @app.get("/submissions/{submission_id}/download")
 async def download_submission(
     submission_id: int,
@@ -2556,7 +2687,7 @@ async def download_submission(
         role = current_user["role"]
         
         # Check permissions
-        if role == RoleType.PROF:
+        if role == RoleType.PROF or role == RoleType.TA:
             # Professors can download any submission
             pass
         elif role == RoleType.STUDENT:
@@ -2571,6 +2702,7 @@ async def download_submission(
         if not os.path.exists(local_path):
             raise HTTPException(status_code=404, detail="File not found")
         
+        # Return the file directly
         return FileResponse(
             local_path,
             filename=submission.original_filename,
@@ -2581,6 +2713,7 @@ async def download_submission(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading submission: {str(e)}")
 
+# this is to get all submittables categorized by status, done by students and profs
 @app.get("/submittables/")
 async def get_submittables(
     db: Session = Depends(get_db),
@@ -2603,10 +2736,11 @@ async def get_submittables(
             submission = team_submissions.get(s.id)
             return {
                 "id": s.id,
-                "title": s.title,  # Ensure title is included
+                "title": s.title,
                 "description": s.description,
                 "opens_at": s.opens_at,
                 "deadline": s.deadline,
+                "max_score": s.max_score,  # Add max_score from submittable
                 "reference_files": [{
                     "id": 1,  # Using a placeholder ID for now
                     "original_filename": s.original_filename
@@ -2615,7 +2749,8 @@ async def get_submittables(
                     "has_submitted": bool(submission),
                     "submission_id": submission.id if submission else None,
                     "submitted_on": submission.submitted_on if submission else None,
-                    "original_filename": submission.original_filename if submission else None
+                    "original_filename": submission.original_filename if submission else None,
+                    "score": submission.score if submission else None  # Add score from submission
                 }
             }
 
@@ -2645,6 +2780,7 @@ async def get_submittables(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submittables: {str(e)}")
 
+# this is to download the reference file for a submittable, done by students and profs
 @app.get("/submittables/{submittable_id}/reference-files/download")
 async def download_reference_file(
     submittable_id: int,
@@ -2677,30 +2813,39 @@ async def download_reference_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
-
+# this is to create a new submittable, done by profs
 @app.post("/submittables/create")
 async def create_submittable(
     title: str = FastAPIForm(...),
     deadline: str = FastAPIForm(...),
     description: str = FastAPIForm(...),
+    max_score: int = FastAPIForm(...),  # Add max_score parameter
     opens_at: Optional[str] = FastAPIForm(None),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    token: str = Depends(prof_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """Create a new submittable with a reference file"""
     try:
         # Basic validation
         try:
-            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
             if opens_at:
-                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                opens_at_dt = datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                # Validate that opens_at is before deadline
+                if opens_at_dt >= deadline_dt:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="opens_at must be before deadline"
+                    )
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format")
-        
+            
+        # Validate max_score
+        if max_score <= 0:
+            raise HTTPException(status_code=400, detail="Maximum score must be greater than zero")
+            
         # Get the creator (professor) from token
-        # Fix: Don't decode the token as it's already decoded by the dependency
-        # payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         payload = token  # The token is already decoded by prof_required dependency
         username = payload.get("sub")
         user = db.query(User).filter(User.username == username).first()
@@ -2722,6 +2867,8 @@ async def create_submittable(
             opens_at=opens_at,
             deadline=deadline,
             description=description,
+            max_score=max_score,  # Add max_score to submittable creation
+            opens_at=opens_at,
             creator_id=user.id,
             file_url=f"uploads/{file_name}",  # URL path without leading slash
             original_filename=file.filename
@@ -2729,12 +2876,35 @@ async def create_submittable(
         
         db.add(new_submittable)
         db.commit()
-        db.refresh(new_submittable)
-        
-        return JSONResponse(status_code=201, content={
-            "message": "Submittable created successfully",
-            "submittable_id": new_submittable.id
-        })
+        db.refresh(submittable)
+
+        # Return JSON response with proper structure
+        return JSONResponse(
+            status_code=201,
+            content={
+                "message": "Submittable created successfully",
+                "submittable": {
+                    "id": submittable.id,
+                    "title": submittable.title,
+                    "opens_at": submittable.opens_at,
+                    "deadline": submittable.deadline,
+                    "description": submittable.description,
+                    "max_score": submittable.max_score,  # Include max_score in response
+                    "created_at": submittable.created_at,
+                    "reference_files": [{
+                        "original_filename": submittable.original_filename
+                    }] if submittable.file_url else [],
+                    "submission_status": {
+                        "has_submitted": False,
+                        "submission_id": None,
+                        "submitted_on": None,
+                        "original_filename": None,
+                        "score": None  # Include score field in submission status
+                    }
+                }
+            }
+        )
+
     except HTTPException as he:
         if 'file_path' in locals() and os.path.exists(file_path):
             os.remove(file_path)  # Clean up file if validation fails
@@ -2745,6 +2915,7 @@ async def create_submittable(
             os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error creating submittable: {str(e)}")
 
+# this is to get details of a specific submittable, done by students and profs
 @app.get("/submittables/{submittable_id}")
 async def get_submittable(
     submittable_id: int,
@@ -2763,6 +2934,7 @@ async def get_submittable(
             "opens_at": submittable.opens_at,
             "deadline": submittable.deadline,
             "description": submittable.description,
+            "max_score": submittable.max_score,
             "created_at": submittable.created_at,
             "reference_file": {
                 "file_url": submittable.file_url,
@@ -2774,6 +2946,7 @@ async def get_submittable(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submittable: {str(e)}")
 
+# this is to get all submissions for a submittable, done by profs
 @app.get("/submittables/{submittable_id}/submissions")
 async def get_submittable_submissions(
     submittable_id: int,
@@ -2782,7 +2955,7 @@ async def get_submittable_submissions(
 ):
     """Get all submissions for a submittable (professors only)"""
     try:
-        if current_user["role"] != RoleType.PROF:
+        if current_user["role"] == RoleType.STUDENT:
             raise HTTPException(status_code=403, detail="Only professors can view all submissions")
         
         submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
@@ -2797,6 +2970,8 @@ async def get_submittable_submissions(
                 "id": submission.id,
                 "team_id": submission.team_id,
                 "submitted_on": submission.submitted_on,
+                "score": submission.score,
+                "max_score": submittable.max_score,
                 "file": {
                     "file_url": submission.file_url,
                     "original_filename": submission.original_filename
@@ -2810,11 +2985,12 @@ async def get_submittable_submissions(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submissions: {str(e)}")
 
+# this is to delete a submittable and all its submissions, done by profs
 @app.delete("/submittables/{submittable_id}")
 async def delete_submittable(
     submittable_id: int,
     db: Session = Depends(get_db),
-    token: str = Depends(prof_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """Delete a submittable and all its submissions (professors only)"""
     try:
@@ -2850,7 +3026,7 @@ async def delete_submittable(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error deleting submittable: {str(e)}")
 
-
+# this is to update a submittable, done by profs
 @app.put("/submittables/{submittable_id}")
 async def update_submittable(
     submittable_id: int,
@@ -2860,17 +3036,24 @@ async def update_submittable(
     opens_at: Optional[str] = FastAPIForm(None),
     file: Optional[UploadFile] = None,
     db: Session = Depends(get_db),
-    token: str = Depends(prof_required)
+    token: str = Depends(prof_or_ta_required)
 ):
     """Update a submittable (professors only)"""
     try:
         # Basic validation
         try:
-            datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
             if opens_at:
-                datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                opens_at_dt = datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                # Validate that opens_at is before deadline
+                if opens_at_dt >= deadline_dt:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="opens_at must be before deadline"
+                    )
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format")
+            
             
         existing_submittable = db.query(Submittable).filter(Submittable.id == submittable_id).first()
         if not existing_submittable:
@@ -2916,6 +3099,7 @@ async def update_submittable(
             os.remove(file_path)  # Clean up file if something went wrong
         raise HTTPException(status_code=500, detail=f"Error updating submittable: {str(e)}")
 
+# this is to delete a submission, done by profs or the student who submitted        
 @app.delete("/submissions/{submission_id}")
 async def delete_submission(
     submission_id: int,
@@ -2930,7 +3114,7 @@ async def delete_submission(
         
         # Check if user is professor or the student who submitted
         user = current_user["user"]
-        if current_user["role"] != RoleType.PROF:
+        if current_user["role"] == RoleType.STUDENT:
             # For students, check if they belong to the team that submitted
             if user.team_id != submission.team_id:
                 raise HTTPException(status_code=403, detail="You can only delete your own submissions")
@@ -3246,6 +3430,96 @@ async def get_team_feedback_details(
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# this is to grade a submission, done by profs
+@app.put("/submissions/{submission_id}/grade")
+async def grade_submission(
+    submission_id: int,
+    score: int = FastAPIForm(...),
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """Grade a submission (professors only)"""
+    try:
+        # Get the submission
+        submission = db.query(Submission).filter(Submission.id == submission_id).first()
+        if not submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+        
+        # Get the submittable to check max score
+        submittable = db.query(Submittable).filter(Submittable.id == submission.submittable_id).first()
+        if not submittable:
+            raise HTTPException(status_code=404, detail="Submittable not found")
+        
+        # Validate score
+        if score < 0:
+            raise HTTPException(status_code=400, detail="Score cannot be negative")
+        if score > submittable.max_score:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Score cannot exceed maximum score of {submittable.max_score}"
+            )
+        
+        # Update the submission score
+        submission.score = score
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={
+            "message": "Submission graded successfully",
+            "submission_id": submission.id,
+            "score": submission.score,
+            "max_score": submittable.max_score
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error grading submission: {str(e)}")
+
+# this is to grade a submission, done by profs
+@app.put("/submissions/{submission_id}/grade")
+async def grade_submission(
+    submission_id: int,
+    score: int = FastAPIForm(...),
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """Grade a submission (professors only)"""
+    try:
+        # Get the submission
+        submission = db.query(Submission).filter(Submission.id == submission_id).first()
+        if not submission:
+            raise HTTPException(status_code=404, detail="Submission not found")
+        
+        # Get the submittable to check max score
+        submittable = db.query(Submittable).filter(Submittable.id == submission.submittable_id).first()
+        if not submittable:
+            raise HTTPException(status_code=404, detail="Submittable not found")
+        
+        # Validate score
+        if score < 0:
+            raise HTTPException(status_code=400, detail="Score cannot be negative")
+        if score > submittable.max_score:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Score cannot exceed maximum score of {submittable.max_score}"
+            )
+        
+        # Update the submission score
+        submission.score = score
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={
+            "message": "Submission graded successfully",
+            "submission_id": submission.id,
+            "score": submission.score,
+            "max_score": submittable.max_score
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error grading submission: {str(e)}")
 
 ##Chatting Routes
 
@@ -3608,3 +3882,792 @@ async def download_file(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
+from sqlalchemy.orm import Session
+
+@app.post("/teams/upload-csv/")
+async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a CSV file.")
+
+    try:
+        # Save the uploaded file to a temporary location
+        temp_file_path = f"temp_{file.filename}"
+        with open(temp_file_path, "wb") as temp_file:
+            temp_file.write(file.file.read())
+
+        # Read the CSV file using pandas
+        df = pd.read_csv(temp_file_path)
+
+        # Validate the CSV format
+        required_columns = ['team_name', 'member1', 'member2', 'member3', 'member4', 'member5', 'member6', 'member7', 'member8', 'member9', 'member10']
+        print(df.columns)
+        for _column_name in required_columns:
+            if _column_name not in df.columns:
+                raise HTTPException(status_code=400, detail=f"Invalid CSV format. Missing column: {_column_name}")
+
+        # Check if all members exist in the Users database and perform other checks
+        team_names = set()
+        members_set = list()
+        for _, row in df.iterrows():
+            team_name = row['team_name']
+            members = []
+            for i in range(1, 11):
+                members.append(row[f'member{i}'])
+
+            # members = [row[f'member{i}'] for i in range(1, 11) if pd.notna(row[f'member{i}'])]
+
+            if team_name in team_names:
+                raise HTTPException(status_code=400, detail=f"Invalid file: Duplicate team name '{team_name}' found.")
+            
+            team_names.add(team_name)
+
+            for member_name in members:
+                user = db.query(User).filter_by(username=member_name).first()
+                if not user:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' does not exist in the database.")
+                if user.team_id:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is already assigned to a team.")
+                if member_name in members_set:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is assigned to multiple teams.")
+            members_set.append(members)
+
+        # Get the highest team ID present in the database
+        # max_team_id = db.query(func.max(Team.id)).scalar() or 0
+
+
+        team_names = list(team_names)
+        print("Team names: ", team_names)
+        print("Members set:", members_set)
+        for i in range(len(team_names)):
+            team_name = team_names[i]
+            members = members_set[i]
+            team = Team(name = team_name)
+            db.add(team)
+            for member in members:
+                user = db.query(User).filter_by(username=member).first()
+                print("Over here")
+                if user:
+                    team.members.append(user)
+                    user.team_id = team.id
+        db.commit()
+
+        
+        # Process each row in the CSV file
+        # for _, row in 
+        #     team_name = row['team_name']
+        #     members = []
+        #     for i in range(10):
+        #         print(row[f'member{i}'])
+        #         members.append(row[f'member{i}'])
+        #     print(members)
+        #     # Create a new team
+        #     team = Team(name=team_name)
+        #     db.add(team)
+
+        #     # Add members to the team
+        #     for member_name in members:
+        #         user = db.query(User).filter_by(name=member_name).first()
+        #         if user:
+        #             # check if user is in team already
+        #             # if user not in team.members:
+        #             #     # check if user is already in a team
+        #             #     if user.team_id is None:
+        #             #         # Add the user to the team
+        #             team.members.append(user)
+        #             user.team_id = team.id  # Assign the team ID to the user
+        #             print("Added user to team:", user.name, "in team:", team.name)
+        # print("Committed the changes")
+        # db.commit()
+
+        # Clean up the temporary file
+        os.remove(temp_file_path)
+
+        return {"detail": "File uploaded and data saved successfully!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# __________________________________
+#            OTP Flow
+# __________________________________
+
+
+
+# Pydantic models for forgot password flow
+class RequestOTPModel(BaseModel):
+    email: EmailStr
+
+class VerifyOTPModel(BaseModel):
+    email: EmailStr
+    otp: str
+
+class ResetPasswordWithOTPModel(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
+    confirm_password: str
+
+# Generate a cryptographically secure OTP
+def generate_secure_otp(length=6):
+    """Generate a cryptographically secure random OTP of specified length"""
+    # Use secrets module for cryptographic security
+    return ''.join(secrets.choice(string.digits) for _ in range(length))
+
+# Hash an OTP for secure storage
+def hash_otp(otp: str) -> str:
+    """Hash an OTP using the same password hashing mechanism"""
+    return pwd_context.hash(otp)
+
+# Verify a provided OTP against its hash
+def verify_otp(plain_otp: str, hashed_otp: str) -> bool:
+    """Verify an OTP against its hashed value"""
+    return pwd_context.verify(plain_otp, hashed_otp)
+
+# Generate a secure random string for passwords
+def generate_secure_string(length=10):
+    """Generate a cryptographically secure random string for temporary passwords"""
+    alphabet = string.ascii_letters + string.digits + string.punctuation
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+# Replace the previous OTP storage dictionary with database operations
+# OTP Request endpoint
+@app.post("/request-otp")
+async def request_otp(request: RequestOTPModel, db: Session = Depends(get_db)):
+    """
+    Request OTP for password reset and send it via email
+    """
+    try:
+        # Check if user with email exists
+        user = db.query(User).filter(User.email == request.email).first()
+        
+        if not user:
+            # For security, we still return the same message
+            # but we'll log this for debugging
+            print(f"OTP request for non-existent email: {request.email}")
+            return {
+                "message": "If the email exists in our system, a verification code has been sent. Please check your spam folder if you don't see it in your inbox.",
+                "status": "email_not_found"  # Add a status for debugging only
+            }
+        
+        # Generate secure OTP
+        plain_otp = generate_secure_otp(6)
+        print(f"Generated OTP for {user.email}: {plain_otp}")  # Only log during development
+        
+        # Hash the OTP for secure storage
+        hashed_otp = hash_otp(plain_otp)
+        
+        # Set expiration time (10 minutes from now)
+        expiration_time = datetime.now(timezone.utc) + timedelta(minutes=10)
+        
+        # Check if an OTP entry already exists for this user
+        existing_otp = db.query(UserOTP).filter(UserOTP.user_id == user.id).first()
+        
+        if existing_otp:
+            # Update existing OTP record
+            existing_otp.hashed_otp = hashed_otp
+            existing_otp.expires_at = expiration_time.isoformat()
+        else:
+            # Create new OTP record
+            new_otp_record = UserOTP(
+                user_id=user.id,
+                hashed_otp=hashed_otp,
+                expires_at=expiration_time.isoformat()
+            )
+            db.add(new_otp_record)
+        
+        # Commit the changes
+        db.commit()
+        
+        # Create email content
+        email_subject = "Your Password Reset Code - Sahara"
+        email_html = create_otp_email(plain_otp)
+        
+        # Send email with OTP
+        try:
+            print(f"Attempting to send email to {user.email} with OTP: {plain_otp}")
+            email_sent = send_email(user.email, email_subject, email_html)
+        except Exception as e:
+            print(f"Exception during email sending: {str(e)}")
+            print(traceback.format_exc())
+            email_sent = False
+        
+        if not email_sent:
+            print(f"Failed to send OTP email to {user.email}")
+            return {
+                "message": "If the email exists in our system, a verification code has been sent. Please check your spam folder if you don't see it in your inbox.",
+                "status": "email_attempted" # For debugging purposes
+            }
+        
+        # For security reasons, always return the same message whether email exists or not
+        return {
+            "message": "If the email exists in our system, a verification code has been sent. Please check your spam folder if you don't see it in your inbox.",
+            "status": "email_sent" # For debugging purposes
+        }
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        print(f"Error in request_otp: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process your request. Please try again."
+        )
+
+# Verify OTP endpoint
+@app.post("/verify-otp")
+async def verify_otp_endpoint(request: VerifyOTPModel, db: Session = Depends(get_db)):
+    """
+    Verify OTP provided by the user
+    """
+    try:
+        # Find user by email
+        user = db.query(User).filter(User.email == request.email).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Get OTP record for user
+        otp_record = db.query(UserOTP).filter(UserOTP.user_id == user.id).first()
+        
+        # Check if OTP record exists
+        if not otp_record:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No active OTP request found for this email"
+            )
+        
+        # Check if OTP has expired
+        expiration_time = datetime.fromisoformat(otp_record.expires_at)
+        if datetime.now(timezone.utc) > expiration_time:
+            # Delete expired OTP
+            db.delete(otp_record)
+            db.commit()
+            
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="OTP has expired. Please request a new one."
+            )
+        
+        # Verify OTP
+        if not verify_otp(request.otp, otp_record.hashed_otp):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OTP"
+            )
+        
+        # OTP is valid - do not delete yet as we need it for reset_password_with_otp
+        return {"message": "OTP verified successfully"}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error in verify_otp: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to verify OTP. Please try again."
+        )
+
+# Reset password with OTP endpoint
+@app.post("/reset-password-with-otp")
+async def reset_password_with_otp(request: ResetPasswordWithOTPModel, db: Session = Depends(get_db)):
+    """
+    Reset password after OTP verification
+    """
+    try:
+        # Find user by email
+        user = db.query(User).filter(User.email == request.email).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Get OTP record for user
+        otp_record = db.query(UserOTP).filter(UserOTP.user_id == user.id).first()
+        
+        # Check if OTP record exists
+        if not otp_record:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No active OTP request found for this email"
+            )
+        
+        # Check if OTP has expired
+        expiration_time = datetime.fromisoformat(otp_record.expires_at)
+        if datetime.now(timezone.utc) > expiration_time:
+            # Delete expired OTP
+            db.delete(otp_record)
+            db.commit()
+            
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="OTP has expired. Please request a new one."
+            )
+        
+        # Verify OTP
+        if not verify_otp(request.otp, otp_record.hashed_otp):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OTP"
+            )
+        
+        # Verify passwords match
+        if request.new_password != request.confirm_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Passwords do not match"
+            )
+        
+        # Hash the new password
+        hashed_password = create_hashed_password(request.new_password)
+        
+        # Update user's password
+        user.hashed_password = hashed_password
+        
+        # Delete the OTP record after successful password reset
+        db.delete(otp_record)
+        
+        # Commit changes
+        db.commit()
+        
+        return {"message": "Password reset successfully"}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        print(f"Error in reset_password_with_otp: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reset password. Please try again."
+        )
+
+# Email configuration - you should store these in environment variables in production
+EMAIL_HOST = "smtp.gmail.com"
+EMAIL_PORT = 587
+EMAIL_HOST_USER = "saharaai.noreply@gmail.com"  # Replace with your email
+EMAIL_HOST_PASSWORD = "zfrr wwru xeru rbhf"  # Replace with your app password
+EMAIL_USE_TLS = True
+DEFAULT_FROM_EMAIL = "Sahara Team <saharaai.noreply@gmail.com>"  # Fixed to use the actual email account
+
+# Function to send emails
+def send_email(to_email, subject, html_content):
+    """
+    Send an HTML email using SMTP
+    
+    Args:
+        to_email: Recipient email address
+        subject: Email subject
+        html_content: HTML body of the email
+    """
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = DEFAULT_FROM_EMAIL
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg['Date'] = formatdate(localtime=True)
+        
+        # Attach HTML content
+        msg.attach(MIMEText(html_content, 'html'))
+        
+        print(f"Attempting to send email to {to_email}")
+        
+        # Connect to SMTP server with more detailed error handling
+        try:
+            # Enable debug output
+            server = smtplib.SMTP(EMAIL_HOST, EMAIL_PORT)
+            server.set_debuglevel(1)  # Add this line to enable verbose debug output
+            print(f"Connected to SMTP server: {EMAIL_HOST}:{EMAIL_PORT}")
+            
+            if EMAIL_USE_TLS:
+                server.starttls()
+                print("TLS encryption enabled")
+            
+            print(f"Logging in with user: {EMAIL_HOST_USER}")
+            server.login(EMAIL_HOST_USER, EMAIL_HOST_PASSWORD)
+            print("Login successful")
+            
+            # Send email - more detailed debugging
+            print(f"Sending mail from {EMAIL_HOST_USER} to {to_email}")
+            result = server.sendmail(EMAIL_HOST_USER, to_email, msg.as_string())
+            print(f"Email sent successfully to {to_email}")
+            print(f"Server response: {result if result else 'No response (success)'}")
+            server.quit()
+            
+            return True
+        except smtplib.SMTPAuthenticationError as auth_err:
+            print(f"SMTP Authentication Error: {str(auth_err)}")
+            return False
+        except smtplib.SMTPRecipientsRefused as ref_err:
+            print(f"Recipients refused: {str(ref_err)}")
+            return False
+        except smtplib.SMTPSenderRefused as send_err:
+            print(f"Sender refused: {str(send_err)}")
+            return False
+        except smtplib.SMTPDataError as data_err:
+            print(f"SMTP data error: {str(data_err)}")
+            return False
+        except smtplib.SMTPException as smtp_e:
+            print(f"SMTP Error: {str(smtp_e)}")
+            return False
+        except Exception as conn_e:
+            print(f"Connection error: {str(conn_e)}")
+            print(f"Error type: {type(conn_e).__name__}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return False
+    except Exception as e:
+        print(f"Failed to prepare email: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+
+# Create HTML email template for OTP
+def create_otp_email(otp, expiry_minutes=10):
+    """
+    Create HTML email content for OTP verification
+    
+    Args:
+        otp: The one-time password
+        expiry_minutes: Validity period in minutes
+    
+    Returns:
+        HTML content as string
+    """
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Password Reset Code</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ background-color: #4CAF50; color: white; padding: 10px; text-align: center; }}
+            .content {{ padding: 20px; background-color: #f9f9f9; }}
+            .code {{ font-size: 24px; font-weight: bold; text-align: center; 
+                    padding: 15px; background-color: #e9e9e9; margin: 20px 0; letter-spacing: 5px; }}
+            .footer {{ font-size: 12px; text-align: center; margin-top: 20px; color: #1f2e6a; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>Password Reset Verification</h2>
+            </div>
+            <div class="content">
+                <p>Hello,</p>
+                <p>You've requested to reset your password for your Sahara account.</p>
+                <p>Please use the following verification code to complete the process:</p>
+                
+                <div class="code">{otp}</div>
+                
+                <p>This code is valid for {expiry_minutes} minutes and can only be used once.</p>
+                <p>If you didn't request a password reset, please ignore this email or contact support if you have concerns.</p>
+            </div>
+            <div class="footer">
+                <p>This is an automated message, please do not reply directly to this email.</p>
+                <p>&copy; {datetime.now().year} Sahara Team</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+@app.get("/feedback/students")
+async def get_student_feedback_info(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get student's team and member data with feedback submission validation"""
+    try:
+        user = current_user["user"]
+        
+        # Check if user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only students can access this endpoint"
+            )
+
+        # Check if user has been assigned to a team
+        if not user.teams:
+            raise HTTPException(
+                status_code=404,
+                detail="You have not been assigned to a team"
+            )
+            
+        team = user.teams[0]  # Get the student's team
+
+        # Get all team members including the current user
+        team_members = [
+            {
+                "id": member.id,
+                "name": member.name,
+                "is_current_user": member.id == user.id
+            }
+            for member in team.members
+        ]
+
+        if len(team_members) <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="No team members found to provide feedback for"
+            )
+
+        # Check if user has already submitted feedback
+        existing_submission = db.query(FeedbackSubmission).filter(
+            FeedbackSubmission.submitter_id == user.id,
+            FeedbackSubmission.team_id == team.id
+        ).first()
+
+        # If there's an existing submission, include the feedback details
+        submitted_feedback = None
+        if existing_submission:
+            feedback_details = db.query(FeedbackDetail).filter(
+                FeedbackDetail.submission_id == existing_submission.id
+            ).all()
+            
+            submitted_feedback = {
+                "submission_id": existing_submission.id,
+                "submitted_at": existing_submission.submitted_at.isoformat(),
+                "details": [
+                    {
+                        "member_id": detail.member_id,
+                        "contribution": detail.contribution,
+                        "remarks": detail.remarks
+                    }
+                    for detail in feedback_details
+                ]
+            }
+
+        return {
+            "team_id": team.id,
+            "team_name": team.name,
+            "members": team_members,
+            "submitted_feedback": submitted_feedback
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/feedback/student/submit")
+async def submit_student_feedback(
+    feedback: FeedbackSubmissionRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Submit feedback for team members"""
+    try:
+        user = current_user["user"]
+        
+        # Check if user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only students can submit feedback"
+            )
+
+        # Check if user belongs to the team they're submitting feedback for
+        if not any(team.id == feedback.team_id for team in user.teams):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only submit feedback for your own team"
+            )
+
+        # Check if user has already submitted feedback
+        existing_submission = db.query(FeedbackSubmission).filter(
+            FeedbackSubmission.submitter_id == user.id,
+            FeedbackSubmission.team_id == feedback.team_id
+        ).first()
+
+        if existing_submission:
+            raise HTTPException(
+                status_code=400,
+                detail="You have already submitted feedback for this team"
+            )
+
+        # Validate that all team members are being rated (except the submitter)
+        team = next(team for team in user.teams if team.id == feedback.team_id)
+        expected_member_count = len(team.members)  # Exclude the submitter
+        if len(feedback.details) != expected_member_count:
+            raise HTTPException(
+                status_code=400,
+                detail="Feedback must be provided for all team members"
+            )
+
+        # Validate that the rated members are actually in the team
+        team_member_ids = {member.id for member in team.members}
+        submitted_member_ids = {detail.member_id for detail in feedback.details}
+        if team_member_ids != submitted_member_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Feedback can only be provided for current team members"
+            )
+
+        # Validate total contribution equals 100%
+        total_contribution = sum(detail.contribution for detail in feedback.details)
+        if total_contribution != 100:
+            raise HTTPException(
+                status_code=400,
+                detail="Total contribution must equal 100%"
+            )
+
+        # Create feedback submission
+        new_submission = FeedbackSubmission(
+            submitter_id=user.id,
+            team_id=feedback.team_id,
+            submitted_at=datetime.now(timezone.utc)
+        )
+        db.add(new_submission)
+        db.flush()  # Get the ID before committing
+
+        # Create feedback details
+        for detail in feedback.details:
+            new_detail = FeedbackDetail(
+                submission_id=new_submission.id,
+                member_id=detail.member_id,
+                contribution=detail.contribution,
+                remarks=detail.remarks
+            )
+            db.add(new_detail)
+
+        db.commit()
+        return {"message": "Feedback submitted successfully"}
+    except HTTPException as he:
+        db.rollback()
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/feedback/admin")
+async def get_admin_feedback(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all teams that have at least one feedback submission"""
+    try:
+        # Check if user is an admin (TA or professor)
+        if current_user["role"] not in [RoleType.TA, RoleType.PROF]:
+            raise HTTPException(
+                status_code=403,
+                detail="Only teaching assistants and professors can access this endpoint"
+            )
+
+        # Get all teams that have feedback submissions
+        teams_with_feedback = (
+            db.query(Team)
+            .join(FeedbackSubmission, Team.id == FeedbackSubmission.team_id)
+            .distinct()
+            .all()
+        )
+
+        result = []
+        for team in teams_with_feedback:
+            # Get submission count for this team
+            submission_count = (
+                db.query(FeedbackSubmission)
+                .filter(FeedbackSubmission.team_id == team.id)
+                .count()
+            )
+
+            result.append({
+                "team_id": team.id,
+                "team_name": team.name,
+                "member_count": len(team.members),
+                "submission_count": submission_count,
+                "last_submission": db.query(FeedbackSubmission)
+                    .filter(FeedbackSubmission.team_id == team.id)
+                    .order_by(FeedbackSubmission.submitted_at.desc())
+                    .first()
+                    .submitted_at.isoformat()
+            })
+
+        return result
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/feedback/admin/view/{team_id}")
+async def get_team_feedback_details(
+    team_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get detailed feedback submissions for a specific team"""
+    try:
+        # Check if user is an admin (TA or professor)
+        if current_user["role"] not in [RoleType.TA, RoleType.PROF]:
+            raise HTTPException(
+                status_code=403,
+                detail="Only teaching assistants and professors can access this endpoint"
+            )
+
+        # Check if team exists
+        team = db.query(Team).filter(Team.id == team_id).first()
+        if not team:
+            raise HTTPException(status_code=404, detail="Team not found")
+
+        # Get all feedback submissions for this team
+        submissions = (
+            db.query(FeedbackSubmission)
+            .filter(FeedbackSubmission.team_id == team_id)
+            .all()
+        )
+
+        # Get all team members for reference
+        team_members = {
+            member.id: member.name 
+            for member in team.members
+        }
+
+        # Format the submissions with detailed information
+        formatted_submissions = []
+        for submission in submissions:
+            # Get details for this submission
+            feedback_details = (
+                db.query(FeedbackDetail)
+                .filter(FeedbackDetail.submission_id == submission.id)
+                .all()
+            )
+
+            # Get submitter info
+            submitter = db.query(User).filter(User.id == submission.submitter_id).first()
+
+            formatted_submissions.append({
+                "submission_id": submission.id,
+                "submitter": {
+                    "id": submitter.id,
+                    "name": submitter.name
+                },
+                "submitted_at": submission.submitted_at.isoformat(),
+                "feedback": [
+                    {
+                        "member_id": detail.member_id,
+                        "member_name": team_members.get(detail.member_id, "Unknown"),
+                        "contribution": detail.contribution,
+                        "remarks": detail.remarks
+                    }
+                    for detail in feedback_details
+                ]
+            })
+
+        return {
+            "team_id": team.id,
+            "team_name": team.name,
+            "members": team_members,
+            "submissions": formatted_submissions
+        }
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
