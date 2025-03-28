@@ -2202,6 +2202,109 @@ def create_skill( skill_req: SkillRequest):
     return {"bgColor" : skill_req.bgColor}
 
 
+@app.get("/teams")
+async def get_student_team(
+    current_user: dict[User, str] = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get student's team and member data with feedback submission validation"""
+    try:
+        user = current_user["user"]
+        
+        # Check if user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only students can access this endpoint"
+            )
+
+        # Check if user has been assigned to a team
+        if not user.teams:
+            raise HTTPException(
+                status_code=404,
+                detail="You have not been assigned to a team"
+            )
+            
+        team = user.teams[0]  # Get the student's team
+
+        # Get all team members including the current user
+        team_members = [
+            {
+                "id": member.id,
+                "name": member.name,
+                "email": member.email,
+                "is_current_user": member.id == user.id
+            }
+            for member in team.members
+        ]
+
+        skills = team.skills
+        skill_data = []
+        for skill in skills:
+            skill_data.append({
+                "id": skill.id,
+                "name": skill.name,
+                "bgColor": skill.bgColor,
+                "color": skill.color,
+                "icon": skill.icon
+            })
+        all_skills = db.query(Skill).all()
+        all_skills_data = []
+        for skill in all_skills:
+            all_skills_data.append({
+                "id": skill.id,
+                "name": skill.name,
+                "bgColor": skill.bgColor,
+                "color": skill.color,
+                "icon": skill.icon
+            })
+        return {
+            "team_id": team.id,
+            "team_name": team.name,
+            "members": team_members,
+            "skills": skill_data,
+            "all_skills":  all_skills
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.put("/teams/skills")
+def update_team_skills(
+    skills: List[int],
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Update team skills
+    """
+    try:
+    # if 1:
+        user = current_user["user"]
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(status_code=403, detail="Only students can access this endpoint")
+        
+        if not user.teams:
+            raise HTTPException(status_code=404, detail="User has no team assigned")
+        team = user.teams[0]  # Get the student's team
+        if not team:
+            raise HTTPException(status_code=404, detail="Team not found")
+        
+        # Clear existing skills and assign new ones
+        team.skills = []
+        for skill_id in skills:
+            skill = db.query(Skill).filter(Skill.id == skill_id).first()
+            if skill:
+                team.skills.append(skill)
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={"message": "Team skills updated successfully"})
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.get("/teams/FormedTeams")
 def setFormedTeams(db: Session = Depends(get_db)):
     teams = db.query(Team).all()
@@ -2501,7 +2604,7 @@ async def submit_file(
     # Get the user's team
     user = db.query(User).filter(User.id == current_user["user"].id).first()
     team = user.teams[0] if user.teams else None
-    if not user or not team.id:
+    if not user or not team:
         raise HTTPException(status_code=400, detail="User must be part of a team to submit")
 
     # Check if team already has a submission
