@@ -136,6 +136,42 @@ class Submission(Base):
     team = relationship("Team", back_populates="submissions")
     submittable = relationship("Submittable", back_populates="submissions")
 
+class Assignable(Base):
+    __tablename__ = "assignables"
+    id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)  # Adding title field
+    opens_at = Column(String, nullable=True)  # ISO 8601 format
+    deadline = Column(String, nullable=False)  # ISO 8601 format
+    description = Column(String, nullable=False)
+    file_url = Column(String, nullable=False)  # URL path to the reference file
+    original_filename = Column(String, nullable=False)
+    max_score = Column(Integer, nullable=False)  # Maximum possible score for this submittable
+    created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+    creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    creator = relationship("User", back_populates="assignables")
+    assignments = relationship("Assignment", back_populates="assignable")
+
+    @validates("creator_id")
+    def validate_creator(self, key, value):
+        with SessionLocal() as db:
+            user = db.query(User).filter_by(id=value).first()
+            if user and user.role.role == RoleType.STUDENT:
+                raise ValueError("Only professors or TAs can create assignables.")
+        return value
+
+class Assignment(Base):
+    __tablename__ = "assignments"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    submitted_on = Column(String, default=datetime.now(timezone.utc).isoformat())
+    file_url = Column(String, nullable=False)  # URL path to the reference file
+    original_filename = Column(String, nullable=False)
+    assignable_id = Column(Integer, ForeignKey("assignables.id"), nullable=False)
+    score = Column(Integer, nullable=True)  # Score received for this submission
+
+    user = relationship("User", back_populates="assignments")
+    assignable = relationship("Assignable", back_populates="assignments")
+
 class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True)
@@ -156,6 +192,7 @@ class User(Base):
     skills = relationship("Skill", secondary=user_skills, back_populates="users")
     gradeable_scores = relationship("GradeableScores", back_populates="user")
     submittables = relationship("Submittable", back_populates="creator", lazy="joined")
+    assignables = relationship("Assignable", back_populates="creator", lazy="joined")
     messages = relationship("Message", back_populates="sender")
     
     @validates('skills')
@@ -4142,3 +4179,602 @@ async def get_team_feedback_details(
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+# assignables start here
+# this is to submit file for an assignable, done by students
+@app.post("/assignables/{assignable_id}/submit")
+async def submit_file(
+    assignable_id: int,
+    file: UploadFile = File(...),  # Now accepts a single file
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Submit a file for an assignable.
+    Only one assignment per submittable per user is allowed.
+    """
+    # Get the submittable
+    assignable = db.query(Assignable).filter(Assignable.id == assignable_id).first()
+    if not assignable:
+        raise HTTPException(status_code=404, detail="Assignable not found")
+
+    # Check if user already has a submission
+    user = db.query(User).filter(User.id == current_user["user"].id).first()
+    existing_assignment = db.query(Assignment).filter(
+        Assignment.user_id == user.user_id,
+        Assignment.assignable_id == assignable_id
+    ).first()
+
+    if existing_assignment:
+        raise HTTPException(
+            status_code=400, 
+            detail="Your team has already submitted a file for this submittable. Please delete the existing submission first."
+        )
+
+    # Check if submission is allowed based on opens_at and deadline
+    now = datetime.now(timezone.utc)
+    opens_at = datetime.fromisoformat(assignable.opens_at) if assignable.opens_at else None
+    deadline = datetime.fromisoformat(assignable.deadline)
+
+    if opens_at and now < opens_at:
+        raise HTTPException(status_code=400, detail="Submission period has not started yet")
+    if now > deadline:
+        raise HTTPException(status_code=400, detail="Submission deadline has passed")
+
+    # Generate a unique filename
+    file_extension = os.path.splitext(file.filename)[1]
+    unique_filename = f"assignment_{uuid.uuid4()}{file_extension}"
+    file_path = os.path.join("uploads", unique_filename)
+
+    # Save the file
+    try:
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+
+    # Create submission record
+    assignment = Assignment(
+        user_id=current_user.user_id,
+        file_url=file_path,
+        original_filename=file.filename,
+        assignable_id=assignable_id,
+        score=None  # Initialize score as None since it hasn't been graded yet
+    )
+
+    try:
+        db.add(assignment)
+        db.commit()
+        db.refresh(assignment)
+        return {
+            "message": "File submitted successfully",
+            "assignment_id": assignment.id,
+            "original_filename": assignment.original_filename,
+            "max_score": assignable.max_score,  # Include max_score in response
+            "score": assignment.score  # Include current score (will be None for new submissions)
+        }
+    except Exception as e:
+        # If database operation fails, delete the uploaded file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=500, detail=f"Failed to create assignment record: {str(e)}")
+    
+# this is to download the file for an assignment, done by profs and students
+@app.get("/assignments/{assignment_id}/download")
+async def download_assignment(
+    assignment_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Download a submission file"""
+    try:
+        assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        
+        user = current_user["user"]
+        role = current_user["role"]
+        
+        # Check permissions
+        if role == RoleType.PROF or role == RoleType.TA:
+            # Professors can download any submission
+            pass
+        elif role == RoleType.STUDENT:
+            # Students can only download their submission
+            if not user.user_id or user.user_id != assignment.user_id:
+                raise HTTPException(status_code=403, detail="Not authorized to download this submission")
+        else:
+            raise HTTPException(status_code=403, detail="Not authorized to download submissions")
+        
+        # Get the file path
+        local_path = assignment.file_url.lstrip('/')
+        if not os.path.exists(local_path):
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        # Return the file directly
+        return FileResponse(
+            local_path,
+            filename=assignment.original_filename,
+            media_type="application/octet-stream"
+        )
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading submission: {str(e)}")
+    
+# this is to get all submittables categorized by status, done by students and profs
+@app.get("/assignables/")
+async def get_assignables(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all assignables categorized by status"""
+    try:
+        # Get all submittables
+        assignables = db.query(Assignable).all()
+        
+        # Get user's team submissions
+        user = current_user["user"]
+        user_assignments = {}
+        if user.user_id:
+            assignments = db.query(Assignment).filter(Assignment.user_id == user.user_id).all()
+            user_assignments = {s.assignable_id: s for s in assignments}
+        
+        # Helper function to format submittable
+        def format_assignable(s):
+            assignment = user_assignments.get(s.id)
+            return {
+                "id": s.id,
+                "title": s.title,
+                "description": s.description,
+                "opens_at": s.opens_at,
+                "deadline": s.deadline,
+                "max_score": s.max_score,  # Add max_score from submittable
+                "reference_files": [{
+                    "original_filename": s.original_filename
+                }] if s.file_url else [],
+                "submission_status": {
+                    "has_submitted": bool(assignment),
+                    "submission_id": assignment.id if assignment else None,
+                    "submitted_on": assignment.submitted_on if assignment else None,
+                    "original_filename": assignment.original_filename if assignment else None,
+                    "score": assignment.score if assignment else None  # Add score from submission
+                }
+            }
+
+        # Categorize submittables
+        now = datetime.now(timezone.utc)
+        upcoming = []
+        open_assignables = []
+        closed = []
+
+        for s in assignables:
+            formatted = format_assignable(s)
+            opens_at = datetime.fromisoformat(s.opens_at) if s.opens_at else None
+            deadline = datetime.fromisoformat(s.deadline)
+
+            if opens_at and now < opens_at:
+                upcoming.append(formatted)
+            elif now > deadline:
+                closed.append(formatted)
+            else:
+                open_assignables.append(formatted)
+
+        return {
+            "upcoming": upcoming,
+            "open": open_assignables,
+            "closed": closed
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching assignables: {str(e)}")
+    
+# this is to download the reference file for an assignable, done by students and profs
+@app.get("/assignables/{assignable_id}/reference-files/download")
+async def download_reference_file(
+    assignable_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Download a reference file for a submittable"""
+    try:
+        # Get the submittable
+        assignable = db.query(Assignable).filter(Assignable.id == assignable_id).first()
+        if not assignable:
+            raise HTTPException(status_code=404, detail="Assignable not found")
+
+        if not assignable.file_url:
+            raise HTTPException(status_code=404, detail="No reference file found")
+
+        # Check if file exists
+        if not os.path.exists(assignable.file_url):
+            raise HTTPException(status_code=404, detail="File not found on server")
+
+        # Return the file
+        return FileResponse(
+            assignable.file_url,
+            media_type='application/octet-stream',
+            filename=assignable.original_filename
+        )
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+    
+# this is to create a new submittable, done by profs
+@app.post("/assignables/create")
+async def create_assignable(
+    title: str = FastAPIForm(...),
+    deadline: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    max_score: int = FastAPIForm(...),  # Add max_score parameter
+    opens_at: Optional[str] = FastAPIForm(None),
+    file: Optional[UploadFile] = File(None),
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """Create a new assignable with an optional reference file"""
+    try:
+        # Basic validation
+        try:
+            deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            if opens_at:
+                opens_at_dt = datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                # Validate that opens_at is before deadline
+                if opens_at_dt >= deadline_dt:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="opens_at must be before deadline"
+                    )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
+            
+        # Validate max_score
+        if max_score <= 0:
+            raise HTTPException(status_code=400, detail="Maximum score must be greater than zero")
+            
+        # Get the creator (professor) from token
+        payload = token  # The token is already decoded by prof_required dependency
+        username = payload.get("sub")
+        user = db.query(User).filter(User.username == username).first()
+        
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Create submittable object
+        assignable = Assignable(
+            title=title,
+            deadline=deadline,
+            description=description,
+            max_score=max_score,  # Add max_score to submittable creation
+            opens_at=opens_at,
+            creator_id=user.id,
+            file_url="",  # Default empty string
+            original_filename=""  # Default empty string
+        )
+
+        # Handle file upload if provided
+        if file:
+            # Create uploads directory if it doesn't exist
+            upload_dir = "uploads"
+            if not os.path.exists(upload_dir):
+                os.makedirs(upload_dir)
+
+            # Generate unique filename
+            file_extension = os.path.splitext(file.filename)[1]
+            unique_filename = f"{uuid.uuid4()}{file_extension}"
+            file_path = os.path.join(upload_dir, unique_filename)
+
+            # Save file
+            with open(file_path, "wb") as buffer:
+                content = await file.read()
+                buffer.write(content)
+
+            # Update submittable with file information
+            assignable.file_url = file_path
+            assignable.original_filename = file.filename
+
+        # Add to database
+        db.add(assignable)
+        db.commit()
+        db.refresh(assignable)
+
+        # Return JSON response with proper structure
+        return JSONResponse(
+            status_code=201,
+            content={
+                "message": "Submittable created successfully",
+                "submittable": {
+                    "id": assignable.id,
+                    "title": assignable.title,
+                    "opens_at": assignable.opens_at,
+                    "deadline": assignable.deadline,
+                    "description": assignable.description,
+                    "max_score": assignable.max_score,  # Include max_score in response
+                    "created_at": assignable.created_at,
+                    "reference_files": [{
+                        "original_filename": assignable.original_filename
+                    }] if assignable.file_url else [],
+                    "submission_status": {
+                        "has_submitted": False,
+                        "submission_id": None,
+                        "submitted_on": None,
+                        "original_filename": None,
+                        "score": None  # Include score field in submission status
+                    }
+                }
+            }
+        )
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error creating assignable: {str(e)}")
+
+# this is to get details of a specific assignable, done by students and profs
+@app.get("/assignables/{assignable_id}")
+async def get_assignable(
+    assignable_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get details of a specific assignanle"""
+    try:
+        assignable = db.query(Assignable).filter(Assignable.id == assignable_id).first()
+        if not assignable:
+            raise HTTPException(status_code=404, detail="Assignable not found")
+        
+        return JSONResponse(status_code=200, content={
+            "id": assignable.id,
+            "title": assignable.title,
+            "opens_at": assignable.opens_at,
+            "deadline": assignable.deadline,
+            "description": assignable.description,
+            "max_score": assignable.max_score,
+            "created_at": assignable.created_at,
+            "reference_file": {
+                "file_url": assignable.file_url,
+                "original_filename": assignable.original_filename
+            } if assignable.file_url else None
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching assignable: {str(e)}")
+
+# this is to get all assignments for an assignable, done by profs
+@app.get("/assignables/{assignable_id}/assignments")
+async def get_assignable_assignments(
+    assignable_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all assignments for a assignable (professors only)"""
+    try:
+        if current_user["role"] == RoleType.STUDENT:
+            raise HTTPException(status_code=403, detail="Only professors or TA can view all assignments")
+        
+        assignable = db.query(Assignable).filter(Assignable.id == assignable_id).first()
+        if not assignable:
+            raise HTTPException(status_code=404, detail="Assignable not found")
+        
+        assignments = db.query(Assignment).filter(Assignment.assignable_id == assignable_id).all()
+        
+        result = []
+        for assignment in assignments:
+            assignment_data = {
+                "id": assignment.id,
+                "team_id": assignment.team_id,
+                "submitted_on": assignment.submitted_on,
+                "score": assignment.score,
+                "max_score": assignment.max_score,
+                "file": {
+                    "file_url": assignment.file_url,
+                    "original_filename": assignment.original_filename
+                }
+            }
+            result.append(assignment_data)
+        
+        return JSONResponse(status_code=200, content=result)
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching assignments: {str(e)}")
+
+# this is to delete a assignable and all its assignments, done by profs
+@app.delete("/assignables/{submittable_id}")
+async def delete_submittable(
+    assignable_id: int,
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """Delete a assignable and all its assignments (professors only)"""
+    try:
+        assignable = db.query(Assignable).filter(Assignable.id == assignable_id).first()
+        if not assignable:
+            raise HTTPException(status_code=404, detail="Assignable not found")
+        
+        # Delete the reference file if it exists
+        if assignable.file_url:
+            local_path = assignable.file_url.lstrip('/')
+            if os.path.exists(local_path):
+                os.remove(local_path)
+        
+        # Delete all submission files
+        assignments = db.query(Assignment).filter(Assignment.assignable_id == assignable_id).all()
+        for assignment in assignments:
+            if assignment.file_url:
+                local_path = assignment.file_url.lstrip('/')
+                if os.path.exists(local_path):
+                    os.remove(local_path)
+        
+        # Delete all submissions
+        db.query(Assignment).filter(Assignment.assignable_id == assignable_id).delete()
+        
+        # Delete the submittable
+        db.delete(assignable)
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={"message": "Assignable deleted successfully"})
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting assignable: {str(e)}")
+    
+# this is to update a assignable, done by profs
+@app.put("/assignable/{assignable_id}")
+async def update_assignable(
+    assignable_id: int,
+    title: str = FastAPIForm(...),
+    deadline: str = FastAPIForm(...),
+    description: str = FastAPIForm(...),
+    opens_at: Optional[str] = FastAPIForm(None),
+    file: Optional[UploadFile] = None,
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """Update a assignable (professors only)"""
+    try:
+        # Basic validation
+        try:
+            deadline_dt = datetime.fromisoformat(deadline.replace('Z', '+00:00'))
+            if opens_at:
+                opens_at_dt = datetime.fromisoformat(opens_at.replace('Z', '+00:00'))
+                # Validate that opens_at is before deadline
+                if opens_at_dt >= deadline_dt:
+                    raise HTTPException(
+                        status_code=400, 
+                        detail="opens_at must be before deadline"
+                    )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format")
+            
+            
+        existing_assignable = db.query(Assignable).filter(Assignable.id == assignable_id).first()
+        if not existing_assignable:
+            raise HTTPException(status_code=404, detail="Assignable not found")
+        
+        # Update basic information
+        existing_assignable.title = title
+        existing_assignable.opens_at = opens_at
+        existing_assignable.deadline = deadline
+        existing_assignable.description = description
+        
+        # Handle file update if provided
+        if file:
+            # Delete old file if it exists
+            if existing_assignable.file_url:
+                old_file_path = existing_assignable.file_url.lstrip('/')
+                if os.path.exists(old_file_path):
+                    os.remove(old_file_path)
+            
+            # Save new file
+            file_extension = file.filename.split('.')[-1]
+            file_name = f"ref_{uuid.uuid4()}.{file_extension}"
+            file_path = f"uploads/{file_name}"
+            
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            
+            existing_assignable.file_url = f"uploads/{file_name}"
+            existing_assignable.original_filename = file.filename
+        
+        db.commit()
+        db.refresh(existing_assignable)
+        
+        return JSONResponse(status_code=200, content={
+            "message": "Submittable updated successfully",
+            "submittable_id": existing_assignable.id
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        if 'file_path' in locals() and os.path.exists(file_path):
+            os.remove(file_path)  # Clean up file if something went wrong
+        raise HTTPException(status_code=500, detail=f"Error updating assignable: {str(e)}")
+    
+# this is to delete a assignment, done by profs or the student who submitted        
+@app.delete("/assignments/{assignment_id}")
+async def delete_assignment(
+    assignment_id: int,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Delete a submission (professors or the submitting student)"""
+    try:
+        assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        
+        # Check if user is professor or the student who submitted
+        user = current_user["user"]
+        if current_user["role"] == RoleType.STUDENT:
+            # For students, check if they belong to the team that submitted
+            if user.user_id != assignment.user_id:
+                raise HTTPException(status_code=403, detail="You can only delete your own submissions")
+        
+        # Delete the submission file if it exists
+        if assignment.file_url:
+            local_path = assignment.file_url.lstrip('/')
+            if os.path.exists(local_path):
+                os.remove(local_path)
+        
+        # Delete the submission record
+        db.delete(assignment)
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={"message": "Assignment deleted successfully"})
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error deleting assignment: {str(e)}")
+    
+# this is to grade a assignment, done by profs
+@app.put("/assignments/{assignment_id}/grade")
+async def grade_assignment(
+    assignment_id: int,
+    score: int = FastAPIForm(...),
+    db: Session = Depends(get_db),
+    token: str = Depends(prof_or_ta_required)
+):
+    """Grade a submission (professors only)"""
+    try:
+        # Get the submission
+        assignment = db.query(Assignment).filter(Assignment.id == assignment_id).first()
+        if not assignment:
+            raise HTTPException(status_code=404, detail="Assignment not found")
+        
+        # Get the submittable to check max score
+        assignable = db.query(Assignable).filter(Assignable.id == assignment.assignable_id).first()
+        if not assignable:
+            raise HTTPException(status_code=404, detail="Assignable not found")
+        
+        # Validate score
+        if score < 0:
+            raise HTTPException(status_code=400, detail="Score cannot be negative")
+        if score > assignable.max_score:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Score cannot exceed maximum score of {assignable.max_score}"
+            )
+        
+        # Update the submission score
+        assignment.score = score
+        db.commit()
+        
+        return JSONResponse(status_code=200, content={
+            "message": "Submission graded successfully",
+            "assignment_id": assignment.id,
+            "score": assignment.score,
+            "max_score": assignment.max_score
+        })
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error grading assignment: {str(e)}")
