@@ -5633,3 +5633,63 @@ async def update_team_tas(
             status_code=500,
             detail=f"Error updating TA assignments: {str(e)}"
         )
+
+@app.get("/user/me")
+async def get_user_data(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """
+    Fetch user data using the token.
+    """
+    try:
+        # Decode the token to get the username
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token"
+            )
+        
+        # Fetch the user from the database
+        user = db.query(User).filter(User.username == username).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Fetch the user's role
+        role = db.query(Role).filter(Role.id == user.role_id).first()
+        
+        # Fetch the user's team name
+        team_name = None
+        if user.team_id:
+            team = db.query(Team).filter(Team.id == user.team_id).first()
+            team_name = team.name if team else None
+        
+        # Return user data
+        return {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "username": user.username,
+            "role": role.role.value,
+            "team_name": team_name  # Send team name instead of team ID
+        }
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired"
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching user data: {str(e)}"
+        )
