@@ -3,7 +3,7 @@ import json
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, Form as FastAPIForm, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text
+from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text, Float
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, validates
 from sqlalchemy.dialects.postgresql import JSONB, insert
@@ -34,7 +34,11 @@ from io import StringIO
 from fastapi.staticfiles import StaticFiles
 from typing import ForwardRef
 import base64
-
+import pandas as pd
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from email.utils import formatdate
 # Create uploads directory if it doesn't exist
 os.makedirs("uploads", exist_ok=True)
 
@@ -355,11 +359,54 @@ class Message(Base):
     sender = relationship("User", back_populates="messages")
     channel = relationship("Channel", back_populates="messages")
 
+class FeedbackSubmission(Base):
+    __tablename__ = "feedback_submissions"
+    id = Column(Integer, primary_key=True)
+    submitter_id = Column(Integer, ForeignKey("users.id"))
+    team_id = Column(Integer, ForeignKey("teams.id"))
+    submitted_at = Column(DateTime, default=datetime.now(timezone.utc))
+    submitter = relationship("User", foreign_keys=[submitter_id])
+    team = relationship("Team")
+    details = relationship("FeedbackDetail", back_populates="submission")
+
+class FeedbackDetail(Base):
+    __tablename__ = "feedback_details"
+    id = Column(Integer, primary_key=True)
+    submission_id = Column(Integer, ForeignKey("feedback_submissions.id"))
+    member_id = Column(Integer, ForeignKey("users.id"))
+    contribution = Column(Float)
+    remarks = Column(Text)
+    submission = relationship("FeedbackSubmission", back_populates="details")
+    member = relationship("User", foreign_keys=[member_id])
+
+# Add these Pydantic models for request validation
+class FeedbackDetailRequest(BaseModel):
+    member_id: int
+    contribution: float
+    remarks: str
+
+class FeedbackSubmissionRequest(BaseModel):
+    team_id: int
+    details: List[FeedbackDetailRequest]
+
+
+
 class TeamSkill(Base):
     __tablename__ = "team_skills"
 
 class UserSkill(Base):
     __tablename__ = "user_skills"
+
+# Define OTP database table
+class UserOTP(Base):
+    __tablename__ = "user_otps"
+    
+    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
+    hashed_otp = Column(String, nullable=False)
+    expires_at = Column(String, nullable=False)  # ISO 8601 format
+    
+    # Relationship with User
+    user = relationship("User", backref="otp_record")
 
 def get_db():
     db = SessionLocal()
@@ -530,7 +577,6 @@ class FormCreateRequest(BaseModel):
 
 class FormResponseSubmit(BaseModel):
     form_id: int
-    user_id: int
     response_data: str  # JSON serialized response data
 
 class UserIdRequest(BaseModel):
@@ -924,6 +970,37 @@ def create_prof(
         "temporary_password": temporary_password
     }
 
+def extract_students(content: str) -> List[dict]:
+    """
+    Extracts student data from the CSV content.
+    Returns a list of dictionaries with student data.
+    """
+    reader = csv.DictReader(content.splitlines())
+    students = []
+    expected_headers = ['RollNo','Name', 'Email']
+    headers = reader.fieldnames
+
+    for header in expected_headers:
+        if header not in headers:
+            raise CSVFormatError(f"Missing header: {header}")
+    
+    for row in reader:
+        student = {
+            'RollNo': row.get('RollNo'),
+            'Name': row.get('Name'),
+            'Email': row.get('Email'),
+            
+        }
+        students.append(student)
+    
+
+    for student in students:
+        if not student['RollNo'] or not student['Name'] or not student['Email']:
+            print(student)
+            raise CSVFormatError("All fields must be filled for each student.")
+    
+    return students
+
 """
 CSV File Format for Student Upload:
 Expected columns:
@@ -960,10 +1037,10 @@ async def upload_students(
     try:
         # Read file content
         content = await file.read()
-        content_str = content.decode('utf-16')
+        content_str = content.decode('utf-8')
         
         try:
-            students = extract_student_data_from_content(content_str)
+            students = extract_students(content_str)
         except CSVFormatError as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -984,8 +1061,8 @@ async def upload_students(
         # Process each student
         for student in students:
             try:
-                username = student['Username']
-                
+                # extract username from email
+                username = student['Email'].split('@')[0]
                 # Check if username already exists
                 existing_user = db.query(User).filter(User.username == username).first()
                 if existing_user:
@@ -997,7 +1074,12 @@ async def upload_students(
                 hashed_password = create_hashed_password(temp_password)
                 
                 # Create new student
+                if 'RollNo' in student:
+                    user_id = student['RollNo']
+                else:
+                    user_id = None
                 new_student = User(
+                    id=user_id,
                     name=student['Name'],
                     email=student['Email'],
                     username=username,
@@ -1611,12 +1693,15 @@ def create_form_db(form_data: FormCreateRequest, db: Session) -> Dict[str, Any]:
         print(f"error creating form: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error creating form: {str(e)}")
 
-def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Dict[str, Any]:
+def store_form_response_db(response_data: FormResponseSubmit, 
+                            user_id: int,  # Current user information
+                           db: Session = Depends(get_db)):
     """
     Store a user's response to a form
     
     Parameters:
     - response_data: FormResponseSubmit object
+    - user_id: Current user information
     - db: Database session
     
     Returns:
@@ -1636,7 +1721,7 @@ def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Di
         # Check if user has already responded
         existing_response = db.query(FormResponse).filter(
             FormResponse.form_id == response_data.form_id,
-            FormResponse.user_id == response_data.user_id
+            FormResponse.user_id == user_id
         ).first()
         
         if existing_response:
@@ -1648,7 +1733,7 @@ def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Di
             # Add new response
             new_response = FormResponse(
                 form_id=response_data.form_id,
-                user_id=response_data.user_id,
+                user_id=user_id,
                 response_data=response_data.response_data,
                 submitted_at=datetime.now(timezone.utc).isoformat()
             )
@@ -1660,7 +1745,6 @@ def store_form_response_db(response_data: FormResponseSubmit, db: Session) -> Di
         return {
             "message": message,
             "form_id": response_data.form_id,
-            "user_id": response_data.user_id
         }
     except HTTPException as he:
         db.rollback()
@@ -1693,8 +1777,6 @@ def get_form_by_id_db(form_id: int, db: Session) -> Dict[str, Any]:
             "created_at": form.created_at,
             "deadline": form.deadline,
             "form_json": json.loads(form.form_json) if hasattr(form, "form_json") else None,
-            "target_type": form.target_type.value,
-            "target_id": form.target_id
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error retrieving form: {str(e)}")
@@ -1803,9 +1885,9 @@ async def api_create_form(form_data: FormCreateRequest, db: Session = Depends(ge
     return JSONResponse(status_code=201, content=result)
 
 @app.post("/api/forms/submit")
-async def api_submit_response(form_response: FormResponseSubmit, db: Session = Depends(get_db)):
+async def api_submit_response(form_response: FormResponseSubmit, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Submit a response to a form"""
-    result = store_form_response_db(form_response, db)
+    result = store_form_response_db(form_response, user["user"].id, db)
     return JSONResponse(status_code=201, content=result)
 
 @app.get("/api/forms/{form_id}")
@@ -3269,3 +3351,794 @@ async def download_file(
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+
+
+from sqlalchemy.orm import Session
+
+@app.post("/teams/upload-csv/")
+async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    if not file.filename.endswith('.csv'):
+        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a CSV file.")
+
+    try:
+        # Save the uploaded file to a temporary location
+        temp_file_path = f"temp_{file.filename}"
+        with open(temp_file_path, "wb") as temp_file:
+            temp_file.write(file.file.read())
+
+        # Read the CSV file using pandas
+        df = pd.read_csv(temp_file_path)
+
+        # Validate the CSV format
+        required_columns = ['team_name', 'member1', 'member2', 'member3', 'member4', 'member5', 'member6', 'member7', 'member8', 'member9', 'member10']
+        print(df.columns)
+        for _column_name in required_columns:
+            if _column_name not in df.columns:
+                raise HTTPException(status_code=400, detail=f"Invalid CSV format. Missing column: {_column_name}")
+
+        # Check if all members exist in the Users database and perform other checks
+        team_names = set()
+        members_set = list()
+        for _, row in df.iterrows():
+            team_name = row['team_name']
+            members = []
+            for i in range(1, 11):
+                members.append(row[f'member{i}'])
+
+            # members = [row[f'member{i}'] for i in range(1, 11) if pd.notna(row[f'member{i}'])]
+
+            if team_name in team_names:
+                raise HTTPException(status_code=400, detail=f"Invalid file: Duplicate team name '{team_name}' found.")
+            
+            team_names.add(team_name)
+
+            for member_name in members:
+                user = db.query(User).filter_by(username=member_name).first()
+                if not user:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' does not exist in the database.")
+                if user.team_id:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is already assigned to a team.")
+                if member_name in members_set:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is assigned to multiple teams.")
+            members_set.append(members)
+
+        # Get the highest team ID present in the database
+        # max_team_id = db.query(func.max(Team.id)).scalar() or 0
+
+
+        team_names = list(team_names)
+        print("Team names: ", team_names)
+        print("Members set:", members_set)
+        for i in range(len(team_names)):
+            team_name = team_names[i]
+            members = members_set[i]
+            team = Team(name = team_name)
+            db.add(team)
+            for member in members:
+                user = db.query(User).filter_by(username=member).first()
+                print("Over here")
+                if user:
+                    team.members.append(user)
+                    user.team_id = team.id
+        db.commit()
+
+        
+        # Process each row in the CSV file
+        # for _, row in 
+        #     team_name = row['team_name']
+        #     members = []
+        #     for i in range(10):
+        #         print(row[f'member{i}'])
+        #         members.append(row[f'member{i}'])
+        #     print(members)
+        #     # Create a new team
+        #     team = Team(name=team_name)
+        #     db.add(team)
+
+        #     # Add members to the team
+        #     for member_name in members:
+        #         user = db.query(User).filter_by(name=member_name).first()
+        #         if user:
+        #             # check if user is in team already
+        #             # if user not in team.members:
+        #             #     # check if user is already in a team
+        #             #     if user.team_id is None:
+        #             #         # Add the user to the team
+        #             team.members.append(user)
+        #             user.team_id = team.id  # Assign the team ID to the user
+        #             print("Added user to team:", user.name, "in team:", team.name)
+        # print("Committed the changes")
+        # db.commit()
+
+        # Clean up the temporary file
+        os.remove(temp_file_path)
+
+        return {"detail": "File uploaded and data saved successfully!"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# __________________________________
+#            OTP Flow
+# __________________________________
+
+
+
+# Pydantic models for forgot password flow
+class RequestOTPModel(BaseModel):
+    email: EmailStr
+
+class VerifyOTPModel(BaseModel):
+    email: EmailStr
+    otp: str
+
+class ResetPasswordWithOTPModel(BaseModel):
+    email: EmailStr
+    otp: str
+    new_password: str
+    confirm_password: str
+
+# Generate a cryptographically secure OTP
+def generate_secure_otp(length=6):
+    """Generate a cryptographically secure random OTP of specified length"""
+    # Use secrets module for cryptographic security
+    return ''.join(secrets.choice(string.digits) for _ in range(length))
+
+# Hash an OTP for secure storage
+def hash_otp(otp: str) -> str:
+    """Hash an OTP using the same password hashing mechanism"""
+    return pwd_context.hash(otp)
+
+# Verify a provided OTP against its hash
+def verify_otp(plain_otp: str, hashed_otp: str) -> bool:
+    """Verify an OTP against its hashed value"""
+    return pwd_context.verify(plain_otp, hashed_otp)
+
+# Generate a secure random string for passwords
+def generate_secure_string(length=10):
+    """Generate a cryptographically secure random string for temporary passwords"""
+    alphabet = string.ascii_letters + string.digits + string.punctuation
+    return ''.join(secrets.choice(alphabet) for _ in range(length))
+
+# Replace the previous OTP storage dictionary with database operations
+# OTP Request endpoint
+@app.post("/request-otp")
+async def request_otp(request: RequestOTPModel, db: Session = Depends(get_db)):
+    """
+    Request OTP for password reset and send it via email
+    """
+    try:
+        # Check if user with email exists
+        user = db.query(User).filter(User.email == request.email).first()
+        
+        if not user:
+            # For security, we still return the same message
+            # but we'll log this for debugging
+            print(f"OTP request for non-existent email: {request.email}")
+            return {
+                "message": "If the email exists in our system, a verification code has been sent. Please check your spam folder if you don't see it in your inbox.",
+                "status": "email_not_found"  # Add a status for debugging only
+            }
+        
+        # Generate secure OTP
+        plain_otp = generate_secure_otp(6)
+        print(f"Generated OTP for {user.email}: {plain_otp}")  # Only log during development
+        
+        # Hash the OTP for secure storage
+        hashed_otp = hash_otp(plain_otp)
+        
+        # Set expiration time (10 minutes from now)
+        expiration_time = datetime.now(timezone.utc) + timedelta(minutes=10)
+        
+        # Check if an OTP entry already exists for this user
+        existing_otp = db.query(UserOTP).filter(UserOTP.user_id == user.id).first()
+        
+        if existing_otp:
+            # Update existing OTP record
+            existing_otp.hashed_otp = hashed_otp
+            existing_otp.expires_at = expiration_time.isoformat()
+        else:
+            # Create new OTP record
+            new_otp_record = UserOTP(
+                user_id=user.id,
+                hashed_otp=hashed_otp,
+                expires_at=expiration_time.isoformat()
+            )
+            db.add(new_otp_record)
+        
+        # Commit the changes
+        db.commit()
+        
+        # Create email content
+        email_subject = "Your Password Reset Code - Sahara"
+        email_html = create_otp_email(plain_otp)
+        
+        # Send email with OTP
+        try:
+            print(f"Attempting to send email to {user.email} with OTP: {plain_otp}")
+            email_sent = send_email(user.email, email_subject, email_html)
+        except Exception as e:
+            print(f"Exception during email sending: {str(e)}")
+            print(traceback.format_exc())
+            email_sent = False
+        
+        if not email_sent:
+            print(f"Failed to send OTP email to {user.email}")
+            return {
+                "message": "If the email exists in our system, a verification code has been sent. Please check your spam folder if you don't see it in your inbox.",
+                "status": "email_attempted" # For debugging purposes
+            }
+        
+        # For security reasons, always return the same message whether email exists or not
+        return {
+            "message": "If the email exists in our system, a verification code has been sent. Please check your spam folder if you don't see it in your inbox.",
+            "status": "email_sent" # For debugging purposes
+        }
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        print(f"Error in request_otp: {e}")
+        print(f"Traceback: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to process your request. Please try again."
+        )
+
+# Verify OTP endpoint
+@app.post("/verify-otp")
+async def verify_otp_endpoint(request: VerifyOTPModel, db: Session = Depends(get_db)):
+    """
+    Verify OTP provided by the user
+    """
+    try:
+        # Find user by email
+        user = db.query(User).filter(User.email == request.email).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Get OTP record for user
+        otp_record = db.query(UserOTP).filter(UserOTP.user_id == user.id).first()
+        
+        # Check if OTP record exists
+        if not otp_record:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No active OTP request found for this email"
+            )
+        
+        # Check if OTP has expired
+        expiration_time = datetime.fromisoformat(otp_record.expires_at)
+        if datetime.now(timezone.utc) > expiration_time:
+            # Delete expired OTP
+            db.delete(otp_record)
+            db.commit()
+            
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="OTP has expired. Please request a new one."
+            )
+        
+        # Verify OTP
+        if not verify_otp(request.otp, otp_record.hashed_otp):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OTP"
+            )
+        
+        # OTP is valid - do not delete yet as we need it for reset_password_with_otp
+        return {"message": "OTP verified successfully"}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error in verify_otp: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to verify OTP. Please try again."
+        )
+
+# Reset password with OTP endpoint
+@app.post("/reset-password-with-otp")
+async def reset_password_with_otp(request: ResetPasswordWithOTPModel, db: Session = Depends(get_db)):
+    """
+    Reset password after OTP verification
+    """
+    try:
+        # Find user by email
+        user = db.query(User).filter(User.email == request.email).first()
+        
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Get OTP record for user
+        otp_record = db.query(UserOTP).filter(UserOTP.user_id == user.id).first()
+        
+        # Check if OTP record exists
+        if not otp_record:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No active OTP request found for this email"
+            )
+        
+        # Check if OTP has expired
+        expiration_time = datetime.fromisoformat(otp_record.expires_at)
+        if datetime.now(timezone.utc) > expiration_time:
+            # Delete expired OTP
+            db.delete(otp_record)
+            db.commit()
+            
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="OTP has expired. Please request a new one."
+            )
+        
+        # Verify OTP
+        if not verify_otp(request.otp, otp_record.hashed_otp):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid OTP"
+            )
+        
+        # Verify passwords match
+        if request.new_password != request.confirm_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Passwords do not match"
+            )
+        
+        # Hash the new password
+        hashed_password = create_hashed_password(request.new_password)
+        
+        # Update user's password
+        user.hashed_password = hashed_password
+        
+        # Delete the OTP record after successful password reset
+        db.delete(otp_record)
+        
+        # Commit changes
+        db.commit()
+        
+        return {"message": "Password reset successfully"}
+    
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        db.rollback()
+        print(f"Error in reset_password_with_otp: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to reset password. Please try again."
+        )
+
+# Email configuration - you should store these in environment variables in production
+EMAIL_HOST = "smtp.gmail.com"
+EMAIL_PORT = 587
+EMAIL_HOST_USER = "saharaai.noreply@gmail.com"  # Replace with your email
+EMAIL_HOST_PASSWORD = "zfrr wwru xeru rbhf"  # Replace with your app password
+EMAIL_USE_TLS = True
+DEFAULT_FROM_EMAIL = "Sahara Team <saharaai.noreply@gmail.com>"  # Fixed to use the actual email account
+
+# Function to send emails
+def send_email(to_email, subject, html_content):
+    """
+    Send an HTML email using SMTP
+    
+    Args:
+        to_email: Recipient email address
+        subject: Email subject
+        html_content: HTML body of the email
+    """
+    try:
+        msg = MIMEMultipart()
+        msg['From'] = DEFAULT_FROM_EMAIL
+        msg['To'] = to_email
+        msg['Subject'] = subject
+        msg['Date'] = formatdate(localtime=True)
+        
+        # Attach HTML content
+        msg.attach(MIMEText(html_content, 'html'))
+        
+        print(f"Attempting to send email to {to_email}")
+        
+        # Connect to SMTP server with more detailed error handling
+        try:
+            # Enable debug output
+            server = smtplib.SMTP(EMAIL_HOST, EMAIL_PORT)
+            server.set_debuglevel(1)  # Add this line to enable verbose debug output
+            print(f"Connected to SMTP server: {EMAIL_HOST}:{EMAIL_PORT}")
+            
+            if EMAIL_USE_TLS:
+                server.starttls()
+                print("TLS encryption enabled")
+            
+            print(f"Logging in with user: {EMAIL_HOST_USER}")
+            server.login(EMAIL_HOST_USER, EMAIL_HOST_PASSWORD)
+            print("Login successful")
+            
+            # Send email - more detailed debugging
+            print(f"Sending mail from {EMAIL_HOST_USER} to {to_email}")
+            result = server.sendmail(EMAIL_HOST_USER, to_email, msg.as_string())
+            print(f"Email sent successfully to {to_email}")
+            print(f"Server response: {result if result else 'No response (success)'}")
+            server.quit()
+            
+            return True
+        except smtplib.SMTPAuthenticationError as auth_err:
+            print(f"SMTP Authentication Error: {str(auth_err)}")
+            return False
+        except smtplib.SMTPRecipientsRefused as ref_err:
+            print(f"Recipients refused: {str(ref_err)}")
+            return False
+        except smtplib.SMTPSenderRefused as send_err:
+            print(f"Sender refused: {str(send_err)}")
+            return False
+        except smtplib.SMTPDataError as data_err:
+            print(f"SMTP data error: {str(data_err)}")
+            return False
+        except smtplib.SMTPException as smtp_e:
+            print(f"SMTP Error: {str(smtp_e)}")
+            return False
+        except Exception as conn_e:
+            print(f"Connection error: {str(conn_e)}")
+            print(f"Error type: {type(conn_e).__name__}")
+            print(f"Traceback: {traceback.format_exc()}")
+            return False
+    except Exception as e:
+        print(f"Failed to prepare email: {str(e)}")
+        print(f"Traceback: {traceback.format_exc()}")
+        return False
+
+# Create HTML email template for OTP
+def create_otp_email(otp, expiry_minutes=10):
+    """
+    Create HTML email content for OTP verification
+    
+    Args:
+        otp: The one-time password
+        expiry_minutes: Validity period in minutes
+    
+    Returns:
+        HTML content as string
+    """
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>Password Reset Code</title>
+        <style>
+            body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
+            .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
+            .header {{ background-color: #4CAF50; color: white; padding: 10px; text-align: center; }}
+            .content {{ padding: 20px; background-color: #f9f9f9; }}
+            .code {{ font-size: 24px; font-weight: bold; text-align: center; 
+                    padding: 15px; background-color: #e9e9e9; margin: 20px 0; letter-spacing: 5px; }}
+            .footer {{ font-size: 12px; text-align: center; margin-top: 20px; color: #1f2e6a; }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h2>Password Reset Verification</h2>
+            </div>
+            <div class="content">
+                <p>Hello,</p>
+                <p>You've requested to reset your password for your Sahara account.</p>
+                <p>Please use the following verification code to complete the process:</p>
+                
+                <div class="code">{otp}</div>
+                
+                <p>This code is valid for {expiry_minutes} minutes and can only be used once.</p>
+                <p>If you didn't request a password reset, please ignore this email or contact support if you have concerns.</p>
+            </div>
+            <div class="footer">
+                <p>This is an automated message, please do not reply directly to this email.</p>
+                <p>&copy; {datetime.now().year} Sahara Team</p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
+@app.get("/feedback/students")
+async def get_student_feedback_info(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get student's team and member data with feedback submission validation"""
+    try:
+        user = current_user["user"]
+        
+        # Check if user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only students can access this endpoint"
+            )
+
+        # Check if user has been assigned to a team
+        if not user.teams:
+            raise HTTPException(
+                status_code=404,
+                detail="You have not been assigned to a team"
+            )
+            
+        team = user.teams[0]  # Get the student's team
+
+        # Get all team members including the current user
+        team_members = [
+            {
+                "id": member.id,
+                "name": member.name,
+                "is_current_user": member.id == user.id
+            }
+            for member in team.members
+        ]
+
+        if len(team_members) <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="No team members found to provide feedback for"
+            )
+
+        # Check if user has already submitted feedback
+        existing_submission = db.query(FeedbackSubmission).filter(
+            FeedbackSubmission.submitter_id == user.id,
+            FeedbackSubmission.team_id == team.id
+        ).first()
+
+        # If there's an existing submission, include the feedback details
+        submitted_feedback = None
+        if existing_submission:
+            feedback_details = db.query(FeedbackDetail).filter(
+                FeedbackDetail.submission_id == existing_submission.id
+            ).all()
+            
+            submitted_feedback = {
+                "submission_id": existing_submission.id,
+                "submitted_at": existing_submission.submitted_at.isoformat(),
+                "details": [
+                    {
+                        "member_id": detail.member_id,
+                        "contribution": detail.contribution,
+                        "remarks": detail.remarks
+                    }
+                    for detail in feedback_details
+                ]
+            }
+
+        return {
+            "team_id": team.id,
+            "team_name": team.name,
+            "members": team_members,
+            "submitted_feedback": submitted_feedback
+        }
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/feedback/student/submit")
+async def submit_student_feedback(
+    feedback: FeedbackSubmissionRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Submit feedback for team members"""
+    try:
+        user = current_user["user"]
+        
+        # Check if user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(
+                status_code=403,
+                detail="Only students can submit feedback"
+            )
+
+        # Check if user belongs to the team they're submitting feedback for
+        if not any(team.id == feedback.team_id for team in user.teams):
+            raise HTTPException(
+                status_code=403,
+                detail="You can only submit feedback for your own team"
+            )
+
+        # Check if user has already submitted feedback
+        existing_submission = db.query(FeedbackSubmission).filter(
+            FeedbackSubmission.submitter_id == user.id,
+            FeedbackSubmission.team_id == feedback.team_id
+        ).first()
+
+        if existing_submission:
+            raise HTTPException(
+                status_code=400,
+                detail="You have already submitted feedback for this team"
+            )
+
+        # Validate that all team members are being rated (except the submitter)
+        team = next(team for team in user.teams if team.id == feedback.team_id)
+        expected_member_count = len(team.members)  # Exclude the submitter
+        if len(feedback.details) != expected_member_count:
+            raise HTTPException(
+                status_code=400,
+                detail="Feedback must be provided for all team members"
+            )
+
+        # Validate that the rated members are actually in the team
+        team_member_ids = {member.id for member in team.members}
+        submitted_member_ids = {detail.member_id for detail in feedback.details}
+        if team_member_ids != submitted_member_ids:
+            raise HTTPException(
+                status_code=400,
+                detail="Feedback can only be provided for current team members"
+            )
+
+        # Validate total contribution equals 100%
+        total_contribution = sum(detail.contribution for detail in feedback.details)
+        if total_contribution != 100:
+            raise HTTPException(
+                status_code=400,
+                detail="Total contribution must equal 100%"
+            )
+
+        # Create feedback submission
+        new_submission = FeedbackSubmission(
+            submitter_id=user.id,
+            team_id=feedback.team_id,
+            submitted_at=datetime.now(timezone.utc)
+        )
+        db.add(new_submission)
+        db.flush()  # Get the ID before committing
+
+        # Create feedback details
+        for detail in feedback.details:
+            new_detail = FeedbackDetail(
+                submission_id=new_submission.id,
+                member_id=detail.member_id,
+                contribution=detail.contribution,
+                remarks=detail.remarks
+            )
+            db.add(new_detail)
+
+        db.commit()
+        return {"message": "Feedback submitted successfully"}
+    except HTTPException as he:
+        db.rollback()
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/feedback/admin")
+async def get_admin_feedback(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all teams that have at least one feedback submission"""
+    try:
+        # Check if user is an admin (TA or professor)
+        if current_user["role"] not in [RoleType.TA, RoleType.PROF]:
+            raise HTTPException(
+                status_code=403,
+                detail="Only teaching assistants and professors can access this endpoint"
+            )
+
+        # Get all teams that have feedback submissions
+        teams_with_feedback = (
+            db.query(Team)
+            .join(FeedbackSubmission, Team.id == FeedbackSubmission.team_id)
+            .distinct()
+            .all()
+        )
+
+        result = []
+        for team in teams_with_feedback:
+            # Get submission count for this team
+            submission_count = (
+                db.query(FeedbackSubmission)
+                .filter(FeedbackSubmission.team_id == team.id)
+                .count()
+            )
+
+            result.append({
+                "team_id": team.id,
+                "team_name": team.name,
+                "member_count": len(team.members),
+                "submission_count": submission_count,
+                "last_submission": db.query(FeedbackSubmission)
+                    .filter(FeedbackSubmission.team_id == team.id)
+                    .order_by(FeedbackSubmission.submitted_at.desc())
+                    .first()
+                    .submitted_at.isoformat()
+            })
+
+        return result
+        
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/feedback/admin/view/{team_id}")
+async def get_team_feedback_details(
+    team_id: int,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get detailed feedback submissions for a specific team"""
+    try:
+        # Check if user is an admin (TA or professor)
+        if current_user["role"] not in [RoleType.TA, RoleType.PROF]:
+            raise HTTPException(
+                status_code=403,
+                detail="Only teaching assistants and professors can access this endpoint"
+            )
+
+        # Check if team exists
+        team = db.query(Team).filter(Team.id == team_id).first()
+        if not team:
+            raise HTTPException(status_code=404, detail="Team not found")
+
+        # Get all feedback submissions for this team
+        submissions = (
+            db.query(FeedbackSubmission)
+            .filter(FeedbackSubmission.team_id == team_id)
+            .all()
+        )
+
+        # Get all team members for reference
+        team_members = {
+            member.id: member.name 
+            for member in team.members
+        }
+
+        # Format the submissions with detailed information
+        formatted_submissions = []
+        for submission in submissions:
+            # Get details for this submission
+            feedback_details = (
+                db.query(FeedbackDetail)
+                .filter(FeedbackDetail.submission_id == submission.id)
+                .all()
+            )
+
+            # Get submitter info
+            submitter = db.query(User).filter(User.id == submission.submitter_id).first()
+
+            formatted_submissions.append({
+                "submission_id": submission.id,
+                "submitter": {
+                    "id": submitter.id,
+                    "name": submitter.name
+                },
+                "submitted_at": submission.submitted_at.isoformat(),
+                "feedback": [
+                    {
+                        "member_id": detail.member_id,
+                        "member_name": team_members.get(detail.member_id, "Unknown"),
+                        "contribution": detail.contribution,
+                        "remarks": detail.remarks
+                    }
+                    for detail in feedback_details
+                ]
+            })
+
+        return {
+            "team_id": team.id,
+            "team_name": team.name,
+            "members": team_members,
+            "submissions": formatted_submissions
+        }
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
