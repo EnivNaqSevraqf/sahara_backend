@@ -4621,10 +4621,10 @@ async def get_assignable_assignments(
         for assignment in assignments:
             assignment_data = {
                 "id": assignment.id,
-                "team_id": assignment.team_id,
+                "team_id": assignment.user_id,
                 "submitted_on": assignment.submitted_on,
                 "score": assignment.score,
-                "max_score": assignment.max_score,
+                "max_score": assignable.max_score,
                 "file": {
                     "file_url": assignment.file_url,
                     "original_filename": assignment.original_filename
@@ -4826,7 +4826,7 @@ async def grade_assignment(
             "message": "Submission graded successfully",
             "assignment_id": assignment.id,
             "score": assignment.score,
-            "max_score": assignment.max_score
+            "max_score": assignable.max_score
         })
     except HTTPException as he:
         raise he
