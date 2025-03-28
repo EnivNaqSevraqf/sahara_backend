@@ -3828,8 +3828,16 @@ async def get_discussions_page(
     
     # Add global channel for all users
     global_channel = db.query(Channel).filter(Channel.type == 'global').first()
-    if global_channel:
-        channels.append(global_channel)
+    if not global_channel:
+        global_channel = Channel(
+            name='Global Chat',
+            type='global'
+        )
+        db.add(global_channel)
+        db.commit()
+        db.refresh(global_channel)
+    
+    channels.append(global_channel)
     
     # For students: add their team channel and team-TA channel if they exist
     if user.role.role == RoleType.STUDENT and user.teams:
