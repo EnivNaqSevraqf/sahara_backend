@@ -48,7 +48,7 @@ from read_csv import extract_student_data_from_content, extract_ta_data_from_con
 
 
 # Database setup - postgres
-DATABASE_URL = "postgresql://avnadmin:AVNS_DkrVvzHCnOiMVJwagav@pg-8b6fabf-sahara-team-8.f.aivencloud.com:17950/defaultdb"
+DATABASE_URL = "postgresql://avnadmin:AVNS_YfDPPydQ-Ax7FLzuLkD@pg-b1db5cd-sahara-raf.f.aivencloud.com:12051/defaultdb?sslmode=require"
 Base = declarative_base()
 
 # Create engine
@@ -665,6 +665,18 @@ class GradeableCreateRequest(BaseModel):
             raise ValueError("Maximum points must be greater than zero")
         return v
 
+# Add this Pydantic model for the team name update request
+class TeamNameUpdateRequest(BaseModel):
+    name: str
+    
+    @validator('name')
+    def validate_name(cls, v):
+        if not v or len(v.strip()) < 3:
+            raise ValueError("Team name must be at least 3 characters long")
+        if len(v.strip()) > 100:
+            raise ValueError("Team name cannot exceed 100 characters")
+        return v.strip()
+
 app = FastAPI()
 
 # CORS Middleware
@@ -679,6 +691,7 @@ app.add_middleware(
 print("Creating tables...")
 Base.metadata.create_all(bind=engine)
 print("Tables created!")
+
 
 # Add missing columns to submittables table if they don't exist
 with engine.connect() as connection:
@@ -2336,6 +2349,49 @@ def setbetaTestPairs(db: Session = Depends(get_db)):
         return_data.append(team_data)
 
     return return_data
+
+@app.put("/teams/name")
+async def update_team_name(
+    request: TeamNameUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Extract user and role
+    user = current_user["user"]
+    role = current_user["role"]
+    
+    # Verify that the user is a student
+    if role != RoleType.STUDENT:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only students can update team names"
+        )
+    
+    # Get the user's team
+    teams = user.teams
+    if not teams:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="You are not a member of any team"
+        )
+    
+    # Update the team name
+    team = teams[0]  # Assuming a student is only in one team
+    team.name = request.name
+    
+    try:
+        db.commit()
+        return {
+            "message": "Team name updated successfully",
+            "team_id": team.id,
+            "team_name": team.name
+        }
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update team name: {str(e)}"
+        )
 
 @app.get("/gradeables/")
 async def get_gradeable_table(
