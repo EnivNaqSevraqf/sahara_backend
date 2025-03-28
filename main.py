@@ -435,27 +435,6 @@ class TeamSkill(Base):
 class UserSkill(Base):
     __tablename__ = "user_skills"
     
-# First, add these models after your existing models
-
-class FeedbackSubmission(Base):
-    __tablename__ = "feedback_submissions"
-    id = Column(Integer, primary_key=True)
-    submitter_id = Column(Integer, ForeignKey("users.id"))
-    team_id = Column(Integer, ForeignKey("teams.id"))
-    submitted_at = Column(DateTime, default=datetime.now(timezone.utc))
-    submitter = relationship("User", foreign_keys=[submitter_id])
-    team = relationship("Team")
-    details = relationship("FeedbackDetail", back_populates="submission")
-
-class FeedbackDetail(Base):
-    __tablename__ = "feedback_details"
-    id = Column(Integer, primary_key=True)
-    submission_id = Column(Integer, ForeignKey("feedback_submissions.id"))
-    member_id = Column(Integer, ForeignKey("users.id"))
-    contribution = Column(Float)
-    remarks = Column(Text)
-    submission = relationship("FeedbackSubmission", back_populates="details")
-    member = relationship("User", foreign_keys=[member_id])
 
 # Add these Pydantic models for request validation
 class FeedbackDetailRequest(BaseModel):
@@ -467,16 +446,6 @@ class FeedbackSubmissionRequest(BaseModel):
     team_id: int
     details: List[FeedbackDetailRequest]
 
-# Define OTP database table
-class UserOTP(Base):
-    __tablename__ = "user_otps"
-    
-    user_id = Column(Integer, ForeignKey("users.id"), primary_key=True)
-    hashed_otp = Column(String, nullable=False)
-    expires_at = Column(String, nullable=False)  # ISO 8601 format
-    
-    # Relationship with User
-    user = relationship("User", backref="otp_record")
 
 # Define OTP database table
 class UserOTP(Base):
@@ -3142,7 +3111,6 @@ async def create_submittable(
             deadline=deadline,
             description=description,
             max_score=max_score,  # Add max_score to submittable creation
-            opens_at=opens_at,
             creator_id=user.id,
             file_url=f"uploads/{file_name}",  # URL path without leading slash
             original_filename=file.filename
@@ -3150,7 +3118,7 @@ async def create_submittable(
         
         db.add(new_submittable)
         db.commit()
-        db.refresh(submittable)
+        db.refresh(new_submittable)
 
         # Return JSON response with proper structure
         return JSONResponse(
@@ -3158,16 +3126,16 @@ async def create_submittable(
             content={
                 "message": "Submittable created successfully",
                 "submittable": {
-                    "id": submittable.id,
-                    "title": submittable.title,
-                    "opens_at": submittable.opens_at,
-                    "deadline": submittable.deadline,
-                    "description": submittable.description,
-                    "max_score": submittable.max_score,  # Include max_score in response
-                    "created_at": submittable.created_at,
+                    "id": new_submittable.id,
+                    "title": new_submittable.title,
+                    "opens_at": new_submittable.opens_at,
+                    "deadline": new_submittable.deadline,
+                    "description": new_submittable.description,
+                    "max_score": new_submittable.max_score,  # Include max_score in response
+                    "created_at": new_submittable.created_at,
                     "reference_files": [{
-                        "original_filename": submittable.original_filename
-                    }] if submittable.file_url else [],
+                        "original_filename": new_submittable.original_filename
+                    }] if new_submittable.file_url else [],
                     "submission_status": {
                         "has_submitted": False,
                         "submission_id": None,
