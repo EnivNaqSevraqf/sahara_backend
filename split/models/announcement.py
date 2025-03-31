@@ -1,12 +1,10 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.orm import relationship, validates
 from datetime import datetime, timezone
-from sqlalchemy.ext.declarative import declarative_base
+from ..database.db import Base
 from ..config.config import SessionLocal
 from ..models.user import User
 from ..models.roles import RoleType
-
-Base = declarative_base()
 
 class Announcement(Base):
     __tablename__ = "announcements"
@@ -21,6 +19,6 @@ class Announcement(Base):
     def validate_creator(self, key, value):
         with SessionLocal() as session:
             user = session.query(User).filter_by(id=value).first()
-            if user and user.role == RoleType.STUDENT:
+            if user and user.role.role == RoleType.STUDENT:
                 raise ValueError("Students cannot create announcements.")
-            return value
+        return value

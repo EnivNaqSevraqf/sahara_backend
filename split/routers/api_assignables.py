@@ -1,12 +1,13 @@
-from fastapi import APIRouter, Depends, HTTPException, status, FileResponse
+from fastapi import APIRouter, Depends, HTTPException, status, Form as FastAPIForm
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import List
-from database.db import get_db
-from models.user import User
-from dependencies.auth import prof_or_ta_required, prof_required, get_current_user
+from ..database.db import get_db
+from ..models.user import User
+from ..dependencies.auth import prof_or_ta_required, prof_required, get_current_user
 from ..models.assignment import Assignment
 from ..models.assignable import Assignable
-from fastapi import FastAPIForm, File, UploadFile
+from fastapi import  File, UploadFile
 from fastapi.responses import JSONResponse
 from datetime import datetime, timezone
 import os

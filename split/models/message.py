@@ -1,9 +1,7 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from sqlalchemy.ext.declarative import declarative_base
-
-Base = declarative_base()
+from ..database.db import Base
 
 class Message(Base):
     __tablename__ = "messages"
@@ -15,5 +13,5 @@ class Message(Base):
     message_type = Column(String(10), default='text')
     file_name = Column(String(255))
 
-    sender = relationship("User", back_populates="messages")
-    channel = relationship("Channel", back_populates="messages") 
+    sender = relationship("User", back_populates="messages", lazy="joined")
+    channel = relationship("Channel", back_populates="messages", lazy="joined") 

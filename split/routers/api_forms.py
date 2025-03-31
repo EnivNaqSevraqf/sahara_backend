@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any, Optional
-from database.db import get_db
-from models.form import Form
-from models.form_response import FormResponse
-from dependencies.auth import get_current_user
+from ..database.db import get_db
+from ..models.form import Form
+from ..models.form_response import FormResponse
+from ..dependencies.auth import get_current_user
 from pydantic import BaseModel
 from datetime import datetime, timezone
 from ..schemas.form_schemas import FormCreateRequest, FormResponseSubmit

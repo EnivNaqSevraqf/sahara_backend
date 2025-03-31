@@ -2,11 +2,11 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 import jwt
-from models.user import User
-from models.roles import Role
-from config.config import SECRET_KEY, ALGORITHM
-from .get_db import get_db
-from schemas.auth_schemas import RoleType
+from ..models.user import User
+from ..models.roles import Role
+from ..config.config import SECRET_KEY, ALGORITHM
+from ..dependencies.get_db import get_db
+from ..schemas.auth_schemas import RoleType
 from ..models.channel import Channel
 from ..models.team_ta import Team_TA
 

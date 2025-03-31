@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from sqlalchemy.orm import Session
 from typing import List
-from database.db import get_db
-from dependencies.auth import prof_or_ta_required, prof_required
+from ..database.db import get_db
+from ..dependencies.auth import prof_or_ta_required, prof_required
 from pydantic import BaseModel
 import os
 import uuid

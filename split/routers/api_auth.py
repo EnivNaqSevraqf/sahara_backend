@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
-from ..database import get_db
+from ..database.db import get_db
 from ..models.user import User
-from ..dependencies.auth import create_access_token, get_current_user
+from ..dependencies.auth import get_current_user
 from pydantic import BaseModel
 from datetime import datetime, timedelta
 from typing import Annotated
@@ -12,8 +12,8 @@ from ..database.init import get_db
 from ..models.roles import Role, RoleType
 from ..schemas.auth_schemas import ResetPasswordRequest, CreateProfRequest
 from ..dependencies.auth import prof_required, prof_or_ta_required
-from ..utils.auth import create_hashed_password, generate_random_string, extract_students, extract_ta_data_from_content
-from read_csv import CSVFormatError
+from ..utils.auth import create_hashed_password, generate_random_string, extract_students
+from ..utils.csv import CSVFormatError, extract_student_data_from_content, extract_ta_data_from_content
 import traceback
 from ..schemas.auth_schemas import TempRegisterRequest
 

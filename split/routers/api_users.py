@@ -1,21 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
-from database.db import get_db
-from models.user import User
-from dependencies.auth import prof_or_ta_required, prof_required
-from pydantic import BaseModel
-from ..schemas.auth_schemas import UserBase, UserCreate
-from fastapi.responses import JSONResponse
-from ..schemas.skill_schemas import AssignSkillsRequest
+from ..database.db import get_db
+from ..models.user import User
 from ..models.roles import Role, RoleType
 from ..models.skills import Skill
-from ..config import SECRET_KEY, ALGORITHM
-import jwt
-from fastapi.security import OAuth2PasswordBearer
-from ..dependencies.auth import oauth2_scheme
-from fastapi import Depends
 from ..models.team import Team
+from ..dependencies.auth import prof_or_ta_required, prof_required, oauth2_scheme
+from ..schemas.auth_schemas import UserBase
+from ..schemas.skill_schemas import AssignSkillsRequest
+from ..config.config import SECRET_KEY, ALGORITHM
+from fastapi.responses import JSONResponse
+import jwt
 
 router = APIRouter(
     prefix="/api/users",
@@ -23,81 +19,6 @@ router = APIRouter(
 )
 
 router2=APIRouter()
-
-@router.get("/")
-async def get_all_users(db: Session = Depends(get_db)):
-    """
-    Get all users through API
-    """
-    users = db.query(User).all()
-    return users
-
-@router.get("/{user_id}")
-async def get_user(user_id: int, db: Session = Depends(get_db)):
-    """
-    Get a specific user through API
-    """
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    return user
-
-@router.post("/create")
-async def create_user(
-    user: UserCreate,
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_required)
-):
-    """
-    Create a new user through API
-    """
-    db_user = User(
-        name=user.name,
-        email=user.email,
-        role=user.role,
-        password=user.password  # Note: In production, hash the password
-    )
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-@router.put("/{user_id}")
-async def update_user(
-    user_id: int,
-    user: UserBase,
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_required)
-):
-    """
-    Update a user through API
-    """
-    db_user = db.query(User).filter(User.id == user_id).first()
-    if not db_user:
-        raise HTTPException(status_code=404, detail="User not found")
-    
-    for key, value in user.dict().items():
-        setattr(db_user, key, value)
-    
-    db.commit()
-    db.refresh(db_user)
-    return db_user
-
-@router.delete("/{user_id}")
-async def delete_user(
-    user_id: int,
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_required)
-):
-    """
-    Delete a user through API
-    """
-    user = db.query(User).filter(User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    db.delete(user)
-    db.commit()
-    return {"message": "User deleted successfully"} 
 
 @router.get("/{user_id}/skills")
 async def get_user_skills(user_id: int, db: Session = Depends(get_db)):

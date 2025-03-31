@@ -1,35 +1,27 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, WebSocket
 from sqlalchemy.orm import Session
 from typing import List
-from database.db import get_db
-from models.user import User
-from dependencies.auth import prof_or_ta_required, prof_required, get_current_user  
-from fastapi.responses import JSONResponse
-from ..models.channel import Channel
-from ..models.message import Message
+from ..database.db import get_db
+from ..models.user import User
 from ..models.roles import RoleType
 from ..models.team import Team
 from ..models.team_ta import Team_TA
+from ..models.channel import Channel
+from ..models.message import Message
+from ..schemas.discussion_schemas import MessageModel
+from ..dependencies.auth import prof_or_ta_required, prof_required, get_current_user, get_current_user_from_string, validate_channel_access
+from fastapi.responses import JSONResponse
 import os
 import uuid
-from ..dependencies.auth import get_current_user_from_string, validate_channel_access
 import json
-from fastapi.responses import JSONResponse
-from fastapi import Depends
 from base64 import b64decode, b64encode
-from fastapi import WebSocket, WebSocketDisconnect
-from fastapi.websockets import WebSocketDisconnect
-from fastapi import WebSocket
 
-
-app=APIRouter(
-  
-    tags=["Discussions"]
+router = APIRouter(
+    prefix="/api/discussions",
+    tags=["API Discussions"]
 )
 
-
-
-@app.post("/discussions")
+@router.post("/discussions")
 async def get_discussions_page(
     current_user_data: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -127,7 +119,7 @@ async def get_discussions_page(
     }
 
 
-@app.get("/discussions/channels/{channel_id}/messages")
+@router.get("/discussions/channels/{channel_id}/messages")
 async def get_messages(
     channel_id: int,
     current_user_data: dict = Depends(get_current_user),
@@ -160,7 +152,7 @@ async def get_messages(
         } for message in messages
     ]
 
-@app.post("/discussions/messages")
+@router.post("/discussions/messages")
 async def send_message(
     message: MessageModel,
     current_user_data: dict = Depends(get_current_user),
@@ -184,7 +176,7 @@ async def send_message(
     try:
         file_path = None
         if message.message_type == 'file' and message.file_data:
-            file_data = base64.b64decode(message.file_data)
+            file_data = b64decode(message.file_data)
             file_name = f"{uuid.uuid4()}_{message.file_name}"
             file_path = os.path.join("forums_uploads", file_name)
             with open(file_path, "wb") as f:
@@ -223,7 +215,7 @@ async def send_message(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.websocket("/discussions/ws/{channel_id}/{token}")
+@router.websocket("/discussions/ws/{channel_id}/{token}")
 async def websocket_endpoint(
     websocket: WebSocket, 
     channel_id: int, 
@@ -256,7 +248,7 @@ async def websocket_endpoint(
     except WebSocketDisconnect:
         manager.disconnect(websocket, channel_id)
 
-@app.get("/discussions/download/{file_name}")
+@router.get("/discussions/download/{file_name}")
 async def download_file(
     file_name: str,
     db: Session = Depends(get_db),
@@ -287,7 +279,7 @@ async def download_file(
         # Read the file and encode it in base64
         with open(local_path, "rb") as file:
             file_data = file.read()
-            encoded_file_data = base64.b64encode(file_data).decode('utf-8')
+            encoded_file_data = b64encode(file_data).decode('utf-8')
         
         return JSONResponse(status_code=200, content={
             "file_id": file_record.id,

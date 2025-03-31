@@ -1,24 +1,15 @@
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, Enum, Table
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, Enum
 from ..database.db import Base
 from sqlalchemy.orm import relationship
 from enum import Enum as PyEnum
+from .associations import user_skills, team_skills
 
-user_skills = Table(
-    "user_skills", Base.metadata,
-    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
-    Column("skill_id", Integer, ForeignKey("skills.id"), primary_key=True)
-)
-# Association table for Team-Skills many-to-many relationship
-team_skills = Table(
-    "team_skills", Base.metadata,
-    Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
-    Column("skill_id", Integer, ForeignKey("skills.id"), primary_key=True)
-)
 class TeamSkill(Base):
     __tablename__ = "team_skills"
 
 class UserSkill(Base):
     __tablename__ = "user_skills"
+
 class Skill(Base):
     __tablename__ = "skills"
     id = Column(Integer, primary_key=True)

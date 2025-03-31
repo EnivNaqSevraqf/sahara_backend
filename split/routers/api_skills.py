@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from typing import List
-from database.db import get_db
-from models.skills import Skill
-from models.user import User
-from dependencies.auth import prof_or_ta_required, prof_required
+from ..database.db import get_db
+from ..models.skills import Skill
+from ..models.user import User
+from ..dependencies.auth import prof_or_ta_required, prof_required
 from pydantic import BaseModel
-from schemas.skill_schemas import SkillCreate, AssignSkillsRequest, SkillRequest
+from ..schemas.skill_schemas import SkillCreate, AssignSkillsRequest, SkillRequest
 from fastapi.responses import JSONResponse
 
 router = APIRouter(

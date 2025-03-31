@@ -2,14 +2,14 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 import jwt
-from models.user import User
-from models.roles import Role
-from config.config import SECRET_KEY, ALGORITHM
+from ..models.user import User
+from ..models.roles import Role
+from ..config.config import SECRET_KEY, ALGORITHM
 from .get_db import get_db
-from schemas.auth_schemas import RoleType
+from ..schemas.auth_schemas import RoleType
 from ..dependencies.auth import oauth2_scheme
 
-
+    
 
 def prof_or_ta_required(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     try:

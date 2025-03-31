@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship
-from ..database import Base
+from ..database.db import Base
 
 class UserOTP(Base):
     __tablename__ = "user_otps"

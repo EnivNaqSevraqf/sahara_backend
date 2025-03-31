@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from ..database import get_db
+from ..database.db import get_db
 from ..models.user import User
 from ..schemas.calendar_schemas import CalendarUpdateModel
 from fastapi.responses import JSONResponse

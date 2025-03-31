@@ -1,4 +1,19 @@
-@app.get("/feedback/students")
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from ..database.db import get_db
+from ..models.user import User
+from ..models.roles import RoleType
+from ..models.team import Team
+from ..models.feedback_detail import FeedbackDetail
+from ..models.feedback_submission import FeedbackSubmission
+from datetime import datetime, timezone
+from ..dependencies.auth import get_current_user
+from ..schemas.feedback_schemas import FeedbackSubmissionRequest
+
+
+router = APIRouter()
+
+@router.get("/feedback/students")
 async def get_student_feedback_info(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -77,7 +92,7 @@ async def get_student_feedback_info(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/feedback/student/submit")
+@router.post("/feedback/student/submit")
 async def submit_student_feedback(
     feedback: FeedbackSubmissionRequest,
     current_user: dict = Depends(get_current_user),
@@ -167,7 +182,7 @@ async def submit_student_feedback(
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/feedback/admin")
+@router.get("/feedback/admin")
 async def get_admin_feedback(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -217,7 +232,7 @@ async def get_admin_feedback(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/feedback/admin/view/{team_id}")
+@router.get("/feedback/admin/view/{team_id}")
 async def get_team_feedback_details(
     team_id: int,
     current_user: dict = Depends(get_current_user),
@@ -293,7 +308,7 @@ async def get_team_feedback_details(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/feedback/students")
+@router.get("/feedback/students")
 async def get_student_feedback_info(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -372,7 +387,7 @@ async def get_student_feedback_info(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/feedback/student/submit")
+@router.post("/feedback/student/submit")
 async def submit_student_feedback(
     feedback: FeedbackSubmissionRequest,
     current_user: dict = Depends(get_current_user),
@@ -462,7 +477,7 @@ async def submit_student_feedback(
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/feedback/admin")
+@router.get("/feedback/admin")
 async def get_admin_feedback(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
@@ -512,7 +527,7 @@ async def get_admin_feedback(
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/feedback/admin/view/{team_id}")
+@router.get("/feedback/admin/view/{team_id}")
 async def get_team_feedback_details(
     team_id: int,
     current_user: dict = Depends(get_current_user),

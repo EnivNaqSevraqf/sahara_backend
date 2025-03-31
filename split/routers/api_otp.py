@@ -1,4 +1,20 @@
-@app.post("/request-otp")
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+from ..database.db import get_db
+from ..models.user import User
+from ..schemas.auth_schemas import RequestOTPModel, VerifyOTPModel, ResetPasswordWithOTPModel
+from ..utils.otp import generate_secure_otp, hash_otp, verify_otp
+from datetime import datetime, timezone, timedelta
+from ..models.user_otp import UserOTP
+
+
+router = APIRouter(
+    
+    tags=["OTP"]
+)
+
+
+@router.post("/request-otp")
 async def request_otp(request: RequestOTPModel, db: Session = Depends(get_db)):
     """
     Request OTP for password reset and send it via email
@@ -83,7 +99,7 @@ async def request_otp(request: RequestOTPModel, db: Session = Depends(get_db)):
         )
 
 # Verify OTP endpoint
-@app.post("/verify-otp")
+@router.post("/verify-otp")
 async def verify_otp_endpoint(request: VerifyOTPModel, db: Session = Depends(get_db)):
     """
     Verify OTP provided by the user
@@ -140,7 +156,7 @@ async def verify_otp_endpoint(request: VerifyOTPModel, db: Session = Depends(get
         )
 
 # Reset password with OTP endpoint
-@app.post("/reset-password-with-otp")
+@router.post("/reset-password-with-otp")
 async def reset_password_with_otp(request: ResetPasswordWithOTPModel, db: Session = Depends(get_db)):
     """
     Reset password after OTP verification

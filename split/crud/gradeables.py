@@ -6,7 +6,7 @@ import csv
 from io import StringIO
 from fastapi import HTTPException
 from ..utils.auth import extract_students
-from models.user import User
+from ..models.user import User
 
 def get_gradeable_table(db: Session):
     gradeables = db.query(Gradeable).all()

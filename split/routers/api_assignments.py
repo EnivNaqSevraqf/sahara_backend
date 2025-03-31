@@ -1,23 +1,24 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Form as FastAPIForm
 from sqlalchemy.orm import Session
 from typing import List
-from database.db import get_db
-from models.user import User
-from dependencies.auth import prof_or_ta_required, prof_required, get_current_user
-from ..models.assignment import Assignment
+from ..database.db import get_db
+from ..models.user import User
 from ..models.roles import RoleType
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi import FastAPIForm
-import os
+from ..models.assignment import Assignment
 from ..models.assignable import Assignable
-app=APIRouter(
-    tags=["Assignments"]
+from ..dependencies.auth import prof_or_ta_required, prof_required, get_current_user
+from fastapi.responses import FileResponse, JSONResponse
+import os
+
+router = APIRouter(
+    prefix="/api/assignments",
+    tags=["API Assignments"]
 )
 
 
 
 
-@app.get("/assignments/{assignment_id}/download")
+@router.get("/assignments/{assignment_id}/download")
 async def download_assignment(
     assignment_id: int,
     db: Session = Depends(get_db),
@@ -61,7 +62,7 @@ async def download_assignment(
     
 
 
-@app.delete("/assignments/{assignment_id}")
+@router.delete("/assignments/{assignment_id}")
 async def delete_assignment(
     assignment_id: int,
     db: Session = Depends(get_db),
@@ -98,7 +99,7 @@ async def delete_assignment(
         raise HTTPException(status_code=500, detail=f"Error deleting assignment: {str(e)}")
     
 # this is to grade a assignment, done by profs
-@app.put("/assignments/{assignment_id}/grade")
+@router.put("/assignments/{assignment_id}/grade")
 async def grade_assignment(
     assignment_id: int,
     score: int = FastAPIForm(...),

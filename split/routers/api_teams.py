@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 import pandas as pd
 from sqlalchemy.orm import Session
 from typing import List
-from ..database import get_db
+from ..database.db import get_db
 from ..models.team import Team
 from ..models.user import User
 from ..dependencies.auth import prof_or_ta_required, prof_required

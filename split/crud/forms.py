@@ -6,7 +6,7 @@ from ..schemas.form_schemas import FormCreateRequest, FormResponseSubmit
 from fastapi import HTTPException, Depends
 from datetime import datetime, timezone
 import json
-from ..database import get_db
+from ..database.db   import get_db
 
 def create_form_db(form_data: FormCreateRequest, db: Session) -> Dict[str, Any]:
     """

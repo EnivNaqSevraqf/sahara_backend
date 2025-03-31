@@ -1,8 +1,6 @@
 from sqlalchemy import Column, Integer, ForeignKey
 from sqlalchemy.orm import relationship
-from sqlalchemy.ext.declarative import declarative_base
-
-Base = declarative_base()
+from ..database.db import Base
 
 class GradeableScores(Base):
     __tablename__ = "gradeable_scores"
@@ -11,5 +9,5 @@ class GradeableScores(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     score = Column(Integer, nullable=False)
 
-    gradeable = relationship("Gradeable", back_populates="scores")
-    user = relationship("User", back_populates="gradeable_scores") 
+    gradeable = relationship("Gradeable", back_populates="scores", lazy="joined")
+    user = relationship("User", back_populates="gradeable_scores", lazy="joined") 

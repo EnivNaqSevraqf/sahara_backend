@@ -4,10 +4,10 @@ from sqlalchemy.orm import sessionmaker
 from ..config.config import DATABASE_URL
 from ..models.user import User
 from ..models.roles import Role, RoleType
-from ..dependencies.auth import pwd_context
+from passlib.context import CryptContext
 from ..config.config import SessionLocal
 
-
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 Base = declarative_base()
 
 def get_db():

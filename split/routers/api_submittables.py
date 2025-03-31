@@ -1,4 +1,26 @@
-@app.post("/submittables/{submittable_id}/submit")
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form as FastAPIForm
+from sqlalchemy.orm import Session
+from typing import Optional
+from ..database.db import get_db
+from ..models.submittable import Submittable
+from ..models.submission import Submission
+from ..models.user import User  
+from ..dependencies.auth import get_current_user, prof_or_ta_required
+from fastapi.responses import FileResponse, JSONResponse
+from datetime import datetime, timezone
+from ..models.roles import RoleType
+import os
+import uuid
+import shutil
+
+
+router = APIRouter(
+    
+    tags=["Submittables"]
+)
+
+
+@router.post("/submittables/{submittable_id}/submit")
 async def submit_file(
     submittable_id: int,
     file: UploadFile = File(...),  # Now accepts a single file
@@ -82,7 +104,7 @@ async def submit_file(
         raise HTTPException(status_code=500, detail=f"Failed to create submission record: {str(e)}")
     
 
-    @app.get("/submissions/{submission_id}/download")
+@router.get("/submissions/{submission_id}/download")
 async def download_submission(
     submission_id: int,
     db: Session = Depends(get_db),
@@ -126,7 +148,7 @@ async def download_submission(
         raise HTTPException(status_code=500, detail=f"Error downloading submission: {str(e)}")
 
 # this is to get all submittables categorized by status, done by students and profs
-@app.get("/submittables/")
+@router.get("/submittables/")
 async def get_submittables(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
@@ -201,7 +223,7 @@ async def get_submittables(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submittables: {str(e)}")
 
-@app.get("/submittables/all")
+@router.get("/submittables/all")
 async def get_all_submittables(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
@@ -261,7 +283,7 @@ async def get_all_submittables(
         raise HTTPException(status_code=500, detail=f"Error fetching submittables: {str(e)}")
     
 # this is to download the reference file for a submittable, done by students and profs
-@app.get("/submittables/{submittable_id}/reference-files/download")
+@router.get("/submittables/{submittable_id}/reference-files/download")
 async def download_reference_file(
     submittable_id: int,
     db: Session = Depends(get_db),
@@ -294,7 +316,7 @@ async def download_reference_file(
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
 
 # this is to create a new submittable, done by profs
-@app.post("/submittables/create")
+@router.post("/submittables/create")
 async def create_submittable(
     title: str = FastAPIForm(...),
     deadline: str = FastAPIForm(...),
@@ -395,7 +417,7 @@ async def create_submittable(
         raise HTTPException(status_code=500, detail=f"Error creating submittable: {str(e)}")
 
 # this is to get details of a specific submittable, done by students and profs
-@app.get("/submittables/{submittable_id}")
+@router.get("/submittables/{submittable_id}")
 async def get_submittable(
     submittable_id: int,
     db: Session = Depends(get_db),
@@ -426,7 +448,7 @@ async def get_submittable(
         raise HTTPException(status_code=500, detail=f"Error fetching submittable: {str(e)}")
 
 # this is to get all submissions for a submittable, done by profs
-@app.get("/submittables/{submittable_id}/submissions")
+@router.get("/submittables/{submittable_id}/submissions")
 async def get_submittable_submissions(
     submittable_id: int,
     db: Session = Depends(get_db),
@@ -465,7 +487,7 @@ async def get_submittable_submissions(
         raise HTTPException(status_code=500, detail=f"Error fetching submissions: {str(e)}")
 
 # this is to delete a submittable and all its submissions, done by profs
-@app.delete("/submittables/{submittable_id}")
+@router.delete("/submittables/{submittable_id}")
 async def delete_submittable(
     submittable_id: int,
     db: Session = Depends(get_db),
@@ -506,7 +528,7 @@ async def delete_submittable(
         raise HTTPException(status_code=500, detail=f"Error deleting submittable: {str(e)}")
 
 # this is to update a submittable, done by profs
-@app.put("/submittables/{submittable_id}")
+@router.put("/submittables/{submittable_id}")
 async def update_submittable(
     submittable_id: int,
     title: str = FastAPIForm(...),

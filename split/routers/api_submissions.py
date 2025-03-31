@@ -1,20 +1,21 @@
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form as FastAPIForm
+
 from sqlalchemy.orm import Session
 from typing import List
-from database.db import get_db
-from models.submission import Submission
-from models.gradeables import Gradeable
-from models.user import User
-from dependencies.auth import prof_or_ta_required, prof_required, get_current_user
+from ..database.db import get_db
+from ..models.submission import Submission
+from ..models.gradeables import Gradeable
+from ..models.user import User
+from ..dependencies.auth import prof_or_ta_required, prof_required, get_current_user
 from pydantic import BaseModel
 from datetime import datetime
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi import FastAPIForm
 import os
 from ..models.roles import RoleType
 from ..models.submittable import Submittable
 
 router = APIRouter(
+    prefix="/api/submissions",
     tags=["API Submissions"]
 )
 
@@ -99,50 +100,6 @@ async def delete_submission(
     except Exception as e:
         db.rollback()
         raise HTTPException(status_code=500, detail=str(e))
-    
-@router.put("/submissions/{submission_id}/grade")
-async def grade_submission(
-    submission_id: int,
-    score: int = FastAPIForm(...),
-    db: Session = Depends(get_db),
-    token: str = Depends(prof_or_ta_required)
-):
-    """Grade a submission (professors only)"""
-    try:
-        # Get the submission
-        submission = db.query(Submission).filter(Submission.id == submission_id).first()
-        if not submission:
-            raise HTTPException(status_code=404, detail="Submission not found")
-        
-        # Get the submittable to check max score
-        submittable = db.query(Submittable).filter(Submittable.id == submission.submittable_id).first()
-        if not submittable:
-            raise HTTPException(status_code=404, detail="Submittable not found")
-        
-        # Validate score
-        if score < 0:
-            raise HTTPException(status_code=400, detail="Score cannot be negative")
-        if score > submittable.max_score:
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Score cannot exceed maximum score of {submittable.max_score}"
-            )
-        
-        # Update the submission score
-        submission.score = score
-        db.commit()
-        
-        return JSONResponse(status_code=200, content={
-            "message": "Submission graded successfully",
-            "submission_id": submission.id,
-            "score": submission.score,
-            "max_score": submittable.max_score
-        })
-    except HTTPException as he:
-        raise he
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error grading submission: {str(e)}")
     
 @router.put("/submissions/{submission_id}/grade")
 async def grade_submission(

@@ -1,9 +1,7 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
-from sqlalchemy.ext.declarative import declarative_base
-
-Base = declarative_base()
+from ..database.db import Base
 
 class Assignment(Base):
     __tablename__ = "assignments"
@@ -15,5 +13,5 @@ class Assignment(Base):
     assignable_id = Column(Integer, ForeignKey("assignables.id"), nullable=False)
     score = Column(Integer, nullable=True)  # Score received for this submission
 
-    user = relationship("User", back_populates="assignments")
-    assignable = relationship("Assignable", back_populates="assignments") 
+    user = relationship("User", back_populates="assignments", lazy="joined")
+    assignable = relationship("Assignable", back_populates="assignments", lazy="joined") 

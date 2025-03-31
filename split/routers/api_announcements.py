@@ -1,13 +1,15 @@
 import os
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, FastAPIForm, FileResponse
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form as FastAPIForm
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
-from database.db import get_db
-from models.announcement import Announcement
-from dependencies.auth import get_current_user
-from pydantic import BaseModel
+from ..database.db import get_db
+from ..models.announcement import Announcement
 from ..models.user import User
+from ..dependencies.auth import get_current_user
+from pydantic import BaseModel
+
 class Show(BaseModel):
     id: int
     creator_id: int
@@ -21,8 +23,8 @@ class Show(BaseModel):
         orm_mode = True
 
 router = APIRouter(
-    prefix="/announcements",
-    tags=["Announcements"]
+    prefix="/api/announcements",
+    tags=["API Announcements"]
 )
 
 @router.post('/', status_code=status.HTTP_201_CREATED)

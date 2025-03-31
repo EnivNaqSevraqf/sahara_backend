@@ -3,7 +3,7 @@ from sqlalchemy.orm import relationship
 from ..database.db import Base
 from enum import Enum as PyEnum
 
-class RoleType(Enum):
+class RoleType(PyEnum):
     PROF = "prof"
     STUDENT = "student"
     TA = "ta"
@@ -15,4 +15,3 @@ class Role(Base):
     role = Column(Enum(RoleType), nullable=False, unique=True)
 
     users = relationship("User", back_populates="role")
-

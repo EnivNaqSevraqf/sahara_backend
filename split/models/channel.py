@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
-from ..database import Base
+from ..database.db import Base
 
 class Channel(Base):
     __tablename__ = "channels"

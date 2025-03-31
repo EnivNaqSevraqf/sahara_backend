@@ -1,14 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Form as FastAPIForm, File, UploadFile
 from sqlalchemy.orm import Session
-from database.db import get_db
-from models.gradeables import Gradeable  # Import your Gradeable model
-from dependencies.auth import prof_or_ta_required  
+from ..database.db import get_db
+from ..models.gradeables import Gradeable
+from ..models.user import User
+from ..models.gradeable_scores import GradeableScores
+from ..dependencies.auth import prof_or_ta_required
+from ..crud.gradeables import parse_scores_from_csv
 from fastapi.responses import JSONResponse
-router = APIRouter ()
-from crud.gradeables import parse_scores_from_csv
-from fastapi import FastAPIForm, File, UploadFile
-from models.user import User
-from models.gradeable_scores import GradeableScores
+
+router = APIRouter(
+    prefix="/api/gradeables",
+    tags=["API Gradeables"]
+)
 
 @router.get("/gradeables/")
 async def get_gradeable_table(

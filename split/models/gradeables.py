@@ -1,6 +1,7 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
-from database.db import Base, relationship, validates
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, DateTime
+from sqlalchemy.orm import relationship, validates
 from datetime import datetime, timezone
+from ..database.db import Base
 from ..config.config import SessionLocal
 from ..models.user import User
 from ..models.roles import RoleType
@@ -23,7 +24,7 @@ class Gradeable(Base):
     def validate_creator(self, key, value):
         with SessionLocal() as session:
             user = session.query(User).filter_by(id=value).first()
-            if user and user.role == RoleType.STUDENT:
+            if user and user.role.role == RoleType.STUDENT:
                 raise ValueError("Students cannot create gradeables.")
-            return value
+        return value
 

@@ -1,9 +1,7 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
-from sqlalchemy.ext.declarative import declarative_base
-
-Base = declarative_base()
+from ..database.db import Base
 
 class FormResponse(Base):
     __tablename__ = "form_responses"
@@ -15,4 +13,4 @@ class FormResponse(Base):
     response_data = Column(String, nullable=False)  # JSON or serialized response data
 
     user = relationship("User", back_populates="responses")
-    form = relationship("Form", back_populates="responses") 
+    form = relationship("Form", back_populates="responses", lazy="joined") 

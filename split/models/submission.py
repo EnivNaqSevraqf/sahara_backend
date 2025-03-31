@@ -1,9 +1,7 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime
 from sqlalchemy.orm import relationship
 from datetime import datetime, timezone
-from sqlalchemy.ext.declarative import declarative_base
-
-Base = declarative_base()
+from ..database.db import Base
 
 class Submission(Base):
     __tablename__ = "submissions"
@@ -15,5 +13,5 @@ class Submission(Base):
     submittable_id = Column(Integer, ForeignKey("submittables.id"), nullable=False)
     score = Column(Integer, nullable=True)  # Score received for this submission
 
-    team = relationship("Team", back_populates="submissions")
-    submittable = relationship("Submittable", back_populates="submissions") 
+    team = relationship("Team", back_populates="submissions", lazy="joined")
+    submittable = relationship("Submittable", back_populates="submissions", lazy="joined") 

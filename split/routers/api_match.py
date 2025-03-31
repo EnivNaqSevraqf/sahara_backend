@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
-from ..database import get_db
+from ..database.db import get_db
 from ..models.team import Team
 from ..models.user import User
 from ..models.skills import Skill, TeamSkill, UserSkill, team_skills

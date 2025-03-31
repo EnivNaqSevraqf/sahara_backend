@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, ForeignKey
 from sqlalchemy.orm import relationship
-from ..database import Base
+from ..database.db import Base
 
 class Team_TA(Base):
     __tablename__ = "team_tas"

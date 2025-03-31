@@ -1,11 +1,9 @@
 from sqlalchemy import Column, Integer, String, DateTime, JSON
 from sqlalchemy.orm import relationship, validates
 from datetime import datetime, timezone
-from sqlalchemy.ext.declarative import declarative_base
+from ..database.db import Base
 from ..config.config import SessionLocal
 from ..models.roles import RoleType, Role
-
-Base = declarative_base()
 
 class Form(Base):
     __tablename__ = "forms"
@@ -16,8 +14,7 @@ class Form(Base):
     deadline = Column(String, nullable=False)  # ISO 8601 format
     form_json = Column(JSON, nullable=False)
 
-    responses = relationship("FormResponse", back_populates="form") 
-
+    responses = relationship("FormResponse", back_populates="form", lazy="joined")
 
     @validates("target_type", "target_id")
     def validate_target(self, key, value):
