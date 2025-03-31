@@ -3030,6 +3030,65 @@ async def get_submittables(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching submittables: {str(e)}")
 
+@app.get("/submittables/all")
+async def get_all_submittables(
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get all submittables categorized by status for professors or TAs"""
+    try:
+        # Check if the user is a professor or TA
+        if current_user["role"] not in [RoleType.PROF, RoleType.TA]:
+            raise HTTPException(
+                status_code=403,
+                detail="Only professors or TAs can access this endpoint"
+            )
+
+        # Fetch all submittables
+        submittables = db.query(Submittable).all()
+
+        # Categorize submittables
+        now = datetime.now(timezone.utc)
+        upcoming = []
+        open_submittables = []
+        closed = []
+
+        for submittable in submittables:
+            opens_at = datetime.fromisoformat(submittable.opens_at) if submittable.opens_at else None
+            deadline = datetime.fromisoformat(submittable.deadline)
+
+            formatted_submittable = {
+                "id": submittable.id,
+                "title": submittable.title,
+                "description": submittable.description,
+                "opens_at": submittable.opens_at,
+                "deadline": submittable.deadline,
+                "max_score": submittable.max_score,
+                "created_at": submittable.created_at,
+                "reference_files": [{
+                    "file_url": submittable.file_url,
+                    "original_filename": submittable.original_filename
+                }] if submittable.file_url else []
+            }
+
+            if opens_at and now < opens_at:
+                upcoming.append(formatted_submittable)
+            elif now > deadline:
+                closed.append(formatted_submittable)
+            else:
+                open_submittables.append(formatted_submittable)
+
+        # Return categorized submittables
+        return {
+            "upcoming": upcoming,
+            "open": open_submittables,
+            "closed": closed
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching submittables: {str(e)}")
+    
 # this is to download the reference file for a submittable, done by students and profs
 @app.get("/submittables/{submittable_id}/reference-files/download")
 async def download_reference_file(
@@ -3835,8 +3894,16 @@ async def get_discussions_page(
     
     # Add global channel for all users
     global_channel = db.query(Channel).filter(Channel.type == 'global').first()
-    if global_channel:
-        channels.append(global_channel)
+    if not global_channel:
+        global_channel = Channel(
+            name='Global Chat',
+            type='global'
+        )
+        db.add(global_channel)
+        db.commit()
+        db.refresh(global_channel)
+    
+    channels.append(global_channel)
     
     # For students: add their team channel and team-TA channel if they exist
     if user.role.role == RoleType.STUDENT and user.teams:
@@ -5402,8 +5469,8 @@ async def get_assignable_assignments(
         raise HTTPException(status_code=500, detail=f"Error fetching assignments: {str(e)}")
 
 # this is to delete a assignable and all its assignments, done by profs
-@app.delete("/assignables/{submittable_id}")
-async def delete_submittable(
+@app.delete("/assignables/{assignable_id}")
+async def delete_assignable(
     assignable_id: int,
     db: Session = Depends(get_db),
     token: str = Depends(prof_or_ta_required)
@@ -5443,7 +5510,7 @@ async def delete_submittable(
         raise HTTPException(status_code=500, detail=f"Error deleting assignable: {str(e)}")
     
 # this is to update a assignable, done by profs
-@app.put("/assignable/{assignable_id}")
+@app.put("/assignables/{assignable_id}")
 async def update_assignable(
     assignable_id: int,
     title: str = FastAPIForm(...),
@@ -5648,4 +5715,64 @@ async def update_team_tas(
         raise HTTPException(
             status_code=500,
             detail=f"Error updating TA assignments: {str(e)}"
+        )
+
+@app.get("/user/me")
+async def get_user_data(
+    token: str = Depends(oauth2_scheme),
+    db: Session = Depends(get_db)
+):
+    """
+    Fetch user data using the token.
+    """
+    try:
+        # Decode the token to get the username
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token"
+            )
+        
+        # Fetch the user from the database
+        user = db.query(User).filter(User.username == username).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="User not found"
+            )
+        
+        # Fetch the user's role
+        role = db.query(Role).filter(Role.id == user.role_id).first()
+        
+        # Fetch the user's team name
+        team_name = None
+        if user.team_id:
+            team = db.query(Team).filter(Team.id == user.team_id).first()
+            team_name = team.name if team else None
+        
+        # Return user data
+        return {
+            "id": user.id,
+            "name": user.name,
+            "email": user.email,
+            "username": user.username,
+            "role": role.role.value,
+            "team_name": team_name  # Send team name instead of team ID
+        }
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired"
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching user data: {str(e)}"
         )
