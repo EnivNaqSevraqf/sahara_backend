@@ -195,6 +195,7 @@ class User(Base):
     assignables = relationship("Assignable", back_populates="creator", lazy="joined")
     assignments = relationship("Assignment", back_populates="user")
     messages = relationship("Message", back_populates="sender")
+    invites = relationship("Team", secondary="invites", back_populates="invites")
     
     @validates('skills')
     def validate_skills(self, key, skill):
@@ -207,12 +208,14 @@ class User(Base):
 
 class Team(Base):
     __tablename__ = "teams"
-    id = Column(Integer, primary_key=True)
+    __table_args__ = {'extend_existing': True}
+    id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False)
     
     members = relationship("User", secondary="team_members", back_populates="teams")
     skills = relationship("Skill", secondary=team_skills, back_populates="teams")
     submissions = relationship("Submission", back_populates="team")
+    invites = relationship("User", secondary="invites", back_populates="invites")
 
 class Form(Base):
     __tablename__ = "forms"
@@ -242,7 +245,12 @@ team_members = Table(
     Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
     Column("user_id", Integer, ForeignKey("users.id"), primary_key=True)
 )
-
+invites = Table(
+    "invites", Base.metadata,
+    Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("invited_at", String, default=datetime.now(timezone.utc).isoformat())
+)
 
 class Announcement(Base):
     __tablename__ = "announcements"
@@ -375,6 +383,18 @@ class Team_TA(Base):
 
     team = relationship("Team", backref="team_tas")
     ta = relationship("User", backref="ta_teams")
+
+# class TeamInvites(Base):
+#     __tablename__ = "team_invites"
+#     id = Column(Integer, primary_key=True)
+#     team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+#     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+#     invited_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+
+#     user = relationship("User", backref="invites")
+#     team = relationship("Team", backref="invitations")
+
+
 
 class Channel(Base):
     __tablename__ = "channels"
@@ -2295,53 +2315,64 @@ async def get_student_team(
             )
 
         # Check if user has been assigned to a team
-        if not user.teams:
-            raise HTTPException(
-                status_code=404,
-                detail="You have not been assigned to a team"
-            )
+        if user.teams:
             
-        team = user.teams[0]  # Get the student's team
+            team = user.teams[0]  # Get the student's team
+            # Get all team members including the current user
+            team_members = [
+                {
+                    "id": member.id,
+                    "name": member.name,
+                    "email": member.email,
+                    "is_current_user": member.id == user.id
+                }
+                for member in team.members
+            ]
 
-        # Get all team members including the current user
-        team_members = [
-            {
-                "id": member.id,
-                "name": member.name,
-                "email": member.email,
-                "is_current_user": member.id == user.id
+            skills = team.skills
+            skill_data = []
+            for skill in skills:
+                skill_data.append({
+                    "id": skill.id,
+                    "name": skill.name,
+                    "bgColor": skill.bgColor,
+                    "color": skill.color,
+                    "icon": skill.icon
+                })
+            all_skills = db.query(Skill).all()
+            all_skills_data = []
+            for skill in all_skills:
+                all_skills_data.append({
+                    "id": skill.id,
+                    "name": skill.name,
+                    "bgColor": skill.bgColor,
+                    "color": skill.color,
+                    "icon": skill.icon
+                })
+            return {
+                "has_team": True,
+                "team_id": team.id,
+                "team_name": team.name,
+                "members": team_members,
+                "skills": skill_data,
+                "all_skills":  all_skills
             }
-            for member in team.members
-        ]
+        else:
+            invites = user.invites
+            # invites = db.query(TeamInvites).filter(TeamInvites.user_id == user.id).all()
+            invite_data = []
+            for team in invites:
+                data = {}
+                data["team_id"] = team.id
+                data["team_name"] = team.name
+                data["team_members"] = [member.name for member in team.members]
+                invite_data.append(data)
 
-        skills = team.skills
-        skill_data = []
-        for skill in skills:
-            skill_data.append({
-                "id": skill.id,
-                "name": skill.name,
-                "bgColor": skill.bgColor,
-                "color": skill.color,
-                "icon": skill.icon
-            })
-        all_skills = db.query(Skill).all()
-        all_skills_data = []
-        for skill in all_skills:
-            all_skills_data.append({
-                "id": skill.id,
-                "name": skill.name,
-                "bgColor": skill.bgColor,
-                "color": skill.color,
-                "icon": skill.icon
-            })
-        return {
-            "team_id": team.id,
-            "team_name": team.name,
-            "members": team_members,
-            "skills": skill_data,
-            "all_skills":  all_skills
-        }
-        
+            return {
+                "has_team": False,
+                "invites": invite_data
+            }
+
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -4399,6 +4430,15 @@ class ResetPasswordWithOTPModel(BaseModel):
     new_password: str
     confirm_password: str
 
+class InviteUserModel(BaseModel):
+    user_id: int
+
+class TeamCreateModel(BaseModel):
+    name: str
+
+class JoinTeamModel(BaseModel):
+    team_id: int
+
 # Generate a cryptographically secure OTP
 def generate_secure_otp(length=6):
     """Generate a cryptographically secure random OTP of specified length"""
@@ -5776,3 +5816,181 @@ async def get_user_data(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching user data: {str(e)}"
         )
+
+@app.get("/teams/get-invites")
+async def get_invites(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    user = current_user["user"]
+
+    # Check if user is a student
+    if current_user["role"] != RoleType.STUDENT:
+        raise HTTPException(status_code=403, detail="Only students can view invites")
+
+    # Check if he is already in a team    
+    if user.teams:
+        raise HTTPException(status_code=400, detail="You are already in a team")
+
+    invites = user.invites
+    # invites = db.query(TeamInvites).filter(TeamInvites.user_id == user.id).all()
+    invite_data = []
+    for team in invites:
+        data = {}
+        data["team_id"] = team.id
+        data["team_name"] = team.name
+        data["team_members"] = [member.name for member in team.members]
+        invite_data.append(data)
+
+    return {"invites": invite_data}
+
+@app.post("/teams/invite")
+async def invite_to_team(
+    invite: InviteUserModel,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        invited_user_id = int(invite.user_id)  # Update to use invite.user_id
+        user = current_user["user"]
+
+        # Ensure user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(status_code=403, detail="Only students can join teams")
+
+        if not user.teams:
+            raise HTTPException(status_code=400, detail="You are not in a team")
+        
+        # Additional logic for inviting to a team goes here
+        # ...
+        # For example, you might want to check if the user is a team leader or has permission to invite others
+
+        # TODO: Check if the user is a team leader and implement team leader and stuff
+
+        # Check if the invited user exists
+        invited_user = db.query(User).filter(User.id == invited_user_id).first()
+        if not invited_user:
+            raise HTTPException(status_code=404, detail="Invited user not found")
+        
+        # Check if invited user is in a team
+        if invited_user.team_id or invited_user.teams:
+            raise HTTPException(status_code=400, detail="Invited user is already in a team")
+        
+        team = user.teams[0]
+        # Check if the team already has an invite for the user
+        if invited_user in team.invites:
+            raise HTTPException(status_code=400, detail="User already invited to this team")
+
+        team.invites.append(invited_user)  # Assuming the relationship is set up correctly
+        db.commit()
+        return {"detail": "User invited to team successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") # TODO: Do I need to change this
+    
+@app.get("/teams/outgoing-invites")
+async def get_outgoing_invites(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        user = current_user["user"]
+
+        # Ensure user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(status_code=403, detail="Only students can view outgoing invites")
+
+        if not user.teams or not user.team_id:
+            raise HTTPException(status_code=400, detail="You are not in a team")
+        
+        team = user.teams[0]
+        # Fetch outgoing invites for the user's team
+        outgoing_invites = team.invites  # Assuming the relationship is set up correctly
+        
+        invite_data = {}
+        invite_data["team_id"] = user.team_id
+        invite_data["team_name"] = team.name
+        invite_data["data"] = []
+        for invite in outgoing_invites:
+            data = {}
+            data["invited_user_id"] = invite.user_id
+            data["invited_user_name"] = invite.name
+            invite_data["data"].append(data)
+
+        return {"outgoing_invites": invite_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") # TODO: Do I need to change this
+
+
+@app.post("/teams/join")
+async def join_team(
+    invite: JoinTeamModel,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    invite_team_id = int(invite.team_id)  # Update to use invite.team_id
+    user = current_user["user"]
+    # Check if user is a student
+    if current_user["role"] != RoleType.STUDENT:
+        raise HTTPException(status_code=403, detail="Only students can join teams")
+    
+    # Check if he is already in a team
+    if user.teams:
+        raise HTTPException(status_code=400, detail="You already belong to a team!")
+    
+    # Check if team invite exists
+    
+    for team in user.invites:
+        if team.id == invite_team_id:
+            team_id = team.id
+            break
+    else:
+        raise HTTPException(status_code=404, detail="Invite not found")
+
+    
+    team = db.query(Team).filter(Team.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found. It might have been deleted")
+
+    user.team_id = team.id
+    team.members.append(user)
+    db.commit()
+    db.refresh(team)
+
+    return {"detail": "Successfully joined the team", "team_id": team.id, "team_name": team.name}
+
+@app.post("/teams/create")
+async def create_team(
+    team: TeamCreateModel,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    team_name = team.name
+    user = current_user["user"]
+    # Check if user is a student
+    if current_user["role"] != RoleType.STUDENT:
+        raise HTTPException(status_code=403, detail="Only students can create teams")
+    # Check if user has an existing team
+
+    if user.teams:
+        raise HTTPException(status_code=400, detail="You already belong to a team!")
+    
+    # Check if team name is already taken
+    existing_team = db.query(Team).filter(Team.name == team_name).first()
+    if existing_team:
+        raise HTTPException(status_code=400, detail="Team name already taken")
+    
+    # Create new team
+    new_team = Team(
+        name=team_name
+    )
+    db.add(new_team)
+    db.commit()
+    db.refresh(new_team)
+    # Add user to the team
+    user.team_id = new_team.id
+    new_team.members.append(user)
+
+    db.commit()
+    db.refresh(new_team)
+
+    return {"team_id": new_team.id, "team_name": new_team.name, "members": [member.name for member in new_team.members]}
