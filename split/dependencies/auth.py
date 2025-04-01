@@ -11,7 +11,7 @@ from ..models.channel import Channel
 from ..models.team_ta import Team_TA
 
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/login")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
 def get_verified_user(token: str = Depends(oauth2_scheme)):
     try:
