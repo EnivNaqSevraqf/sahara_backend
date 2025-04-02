@@ -5757,7 +5757,7 @@ async def update_team_tas(
             detail=f"Error updating TA assignments: {str(e)}"
         )
 
-@app.get("/user/me")
+@app.get("/users/me")
 async def get_user_data(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
