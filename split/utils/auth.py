@@ -56,28 +56,29 @@ def extract_students(content: str) -> List[dict]:
     students = []
     expected_headers = ['RollNo','Name', 'Email']
     headers = reader.fieldnames
+    try:
+        for header in expected_headers:
+            if header not in headers:
+                raise CSVFormatError(f"Missing header: {header}")
+        
+        for row in reader:
+            student = {
+                'RollNo': row.get('RollNo'),
+                'Name': row.get('Name'),
+                'Email': row.get('Email'),
+                
+            }
+            students.append(student)
+        
 
-    for header in expected_headers:
-        if header not in headers:
-            raise CSVFormatError(f"Missing header: {header}")
-    
-    for row in reader:
-        student = {
-            'RollNo': row.get('RollNo'),
-            'Name': row.get('Name'),
-            'Email': row.get('Email'),
-            
-        }
-        students.append(student)
-    
-
-    for student in students:
-        if not student['RollNo'] or not student['Name'] or not student['Email']:
-            print(student)
-            raise CSVFormatError("All fields must be filled for each student.")
-    
-    return students
-
+        for student in students:
+            if not student['RollNo'] or not student['Name'] or not student['Email']:
+                print(student)
+                raise CSVFormatError("All fields must be filled for each student.")
+        
+        return students
+    except CSVFormatError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 """
 CSV File Format for Student Upload:
 Expected columns:
