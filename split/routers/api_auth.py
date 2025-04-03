@@ -18,7 +18,7 @@ import traceback
 from ..schemas.auth_schemas import TempRegisterRequest
 
 router = APIRouter(
-    prefix="/api/auth",
+    prefix="",
     tags=["API Auth"]
 )
 
@@ -68,24 +68,33 @@ def reset_password(
     current_user_data: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    # Check if passwords match
-    if request.new_password != request.confirm_password:
+    try:
+        # Check if passwords match
+        if request.new_password != request.confirm_password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Passwords don't match"
+            )
+        
+        # Get user object
+        user = current_user_data["user"]
+        
+        # Hash the new password
+        hashed_password = create_hashed_password(request.new_password)
+        
+        # Update password
+        user.hashed_password = hashed_password
+        db.commit()
+        
+        return {"message": "Password reset successfully"}
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Reset password error: {str(e)}")
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Passwords don't match"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Internal server error"
         )
-    
-    # Get user object
-    user = current_user_data["user"]
-    
-    # Hash the new password
-    hashed_password = create_hashed_password(request.new_password)
-    
-    # Update password
-    user.hashed_password = hashed_password
-    db.commit()
-    
-    return {"message": "Password reset successfully"}
 
 @router.post("/create-prof")
 def create_prof(
@@ -96,44 +105,53 @@ def create_prof(
     # Extract username from email
     username = request.email.split('@')[0]
     
-    # Check if username already exists
-    existing_user = db.query(User).filter(User.username == username).first()
-    if existing_user:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, 
-            detail=f"Username {username} already exists"
+    try:
+        # Check if username already exists
+        existing_user = db.query(User).filter(User.username == username).first()
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, 
+                detail=f"Username {username} already exists"
+            )
+        
+        # Get prof role id
+        prof_role = db.query(Role).filter(Role.role == RoleType.PROF).first()
+        if not prof_role:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Professor role not found"
+            )
+        
+        # Generate temporary password
+        temporary_password = generate_random_string(10)
+        hashed_password = create_hashed_password(temporary_password)
+        
+        # Create new professor
+        new_prof = User(
+            name=request.name, 
+            email=request.email, 
+            username=username, 
+            hashed_password=hashed_password,
+            role_id=prof_role.id
         )
-    
-    # Get prof role id
-    prof_role = db.query(Role).filter(Role.role == RoleType.PROF).first()
-    if not prof_role:
+        
+        db.add(new_prof)
+        db.commit()
+        db.refresh(new_prof)
+        
+        return {
+            "message": "Professor created successfully",
+            "username": username,
+            "temporary_password": temporary_password
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Create professor error: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Professor role not found"
-        )
-    
-    # Generate temporary password
-    temporary_password = generate_random_string(10)
-    hashed_password = create_hashed_password(temporary_password)
-    
-    # Create new professor
-    new_prof = User(
-        name=request.name, 
-        email=request.email, 
-        username=username, 
-        hashed_password=hashed_password,
-        role_id=prof_role.id
-    )
-    
-    db.add(new_prof)
-    db.commit()
-    db.refresh(new_prof)
-    
-    return {
-        "message": "Professor created successfully",
-        "username": username,
-        "temporary_password": temporary_password
-    }
+            detail="Internal server error"
+        )   
 
 @router.post("/upload-students")
 async def upload_students(
@@ -141,26 +159,18 @@ async def upload_students(
     token: str = Depends(prof_or_ta_required),  # Updated dependency
     db: Session = Depends(get_db)
 ):
-    # Ensure the file is a CSV
-    if not file.filename.endswith('.csv'):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only CSV files are allowed"
-        )
-    
     try:
+        # Ensure the file is a CSV
+        if not file.filename.endswith('.csv'):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only CSV files are allowed"
+            )
         # Read file content
         content = await file.read()
         content_str = content.decode('utf-8')
         
-        try:
-            students = extract_students(content_str)
-        except CSVFormatError as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"CSV format error: {str(e)}"
-            )
-        
+        students = extract_students(content_str)
         created_students = []
         errors = []
         
@@ -175,12 +185,19 @@ async def upload_students(
         # Process each student
         for student in students:
             try:
+                # Debug: Log the student being processed
+                print(f"Processing student: {student}")
+
                 # extract username from email
                 username = student['Email'].split('@')[0]
+                # Debug: Log the extracted username
+                print(f"Extracted username: {username}")
+
                 # Check if username already exists
                 existing_user = db.query(User).filter(User.username == username).first()
                 if existing_user:
                     errors.append(f"Username {username} already exists")
+                    print(f"Error: Username {username} already exists")
                     continue
                 
                 # Generate random password
@@ -192,6 +209,9 @@ async def upload_students(
                     user_id = student['RollNo']
                 else:
                     user_id = None
+                # Debug: Log the user ID being assigned
+                print(f"Assigned user ID: {user_id}")
+
                 new_student = User(
                     id=user_id,
                     name=student['Name'],
@@ -213,16 +233,26 @@ async def upload_students(
                     "username": username,
                     "temp_password": temp_password
                 })
+                # Debug: Log successful creation
+                print(f"Successfully created student: {new_student}")
                 
             except Exception as e:
                 errors.append(f"Error processing student {student}: {str(e)}")
+                # Debug: Log the exception
+                print(f"Exception occurred: {str(e)}")
         
         return {
             "message": f"Processed {len(created_students)} students",
             "created_students": created_students,
             "errors": errors
         }
-    
+    except HTTPException as he:
+        raise he
+    except CSVFormatError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"CSV format error: {str(e)}"
+        )
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(
