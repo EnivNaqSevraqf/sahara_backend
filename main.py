@@ -195,6 +195,7 @@ class User(Base):
     assignables = relationship("Assignable", back_populates="creator", lazy="joined")
     assignments = relationship("Assignment", back_populates="user")
     messages = relationship("Message", back_populates="sender")
+    invites = relationship("Team", secondary="invites", back_populates="invites")
     
     @validates('skills')
     def validate_skills(self, key, skill):
@@ -207,12 +208,14 @@ class User(Base):
 
 class Team(Base):
     __tablename__ = "teams"
-    id = Column(Integer, primary_key=True)
+    __table_args__ = {'extend_existing': True}
+    id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, nullable=False)
     
     members = relationship("User", secondary="team_members", back_populates="teams")
     skills = relationship("Skill", secondary=team_skills, back_populates="teams")
     submissions = relationship("Submission", back_populates="team")
+    invites = relationship("User", secondary="invites", back_populates="invites")
 
 class Form(Base):
     __tablename__ = "forms"
@@ -242,7 +245,12 @@ team_members = Table(
     Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
     Column("user_id", Integer, ForeignKey("users.id"), primary_key=True)
 )
-
+invites = Table(
+    "invites", Base.metadata,
+    Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("invited_at", String, default=datetime.now(timezone.utc).isoformat())
+)
 
 class Announcement(Base):
     __tablename__ = "announcements"
@@ -375,6 +383,18 @@ class Team_TA(Base):
 
     team = relationship("Team", backref="team_tas")
     ta = relationship("User", backref="ta_teams")
+
+# class TeamInvites(Base):
+#     __tablename__ = "team_invites"
+#     id = Column(Integer, primary_key=True)
+#     team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+#     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+#     invited_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+
+#     user = relationship("User", backref="invites")
+#     team = relationship("Team", backref="invitations")
+
+
 
 class Channel(Base):
     __tablename__ = "channels"
@@ -2295,53 +2315,64 @@ async def get_student_team(
             )
 
         # Check if user has been assigned to a team
-        if not user.teams:
-            raise HTTPException(
-                status_code=404,
-                detail="You have not been assigned to a team"
-            )
+        if user.teams:
             
-        team = user.teams[0]  # Get the student's team
+            team = user.teams[0]  # Get the student's team
+            # Get all team members including the current user
+            team_members = [
+                {
+                    "id": member.id,
+                    "name": member.name,
+                    "email": member.email,
+                    "is_current_user": member.id == user.id
+                }
+                for member in team.members
+            ]
 
-        # Get all team members including the current user
-        team_members = [
-            {
-                "id": member.id,
-                "name": member.name,
-                "email": member.email,
-                "is_current_user": member.id == user.id
+            skills = team.skills
+            skill_data = []
+            for skill in skills:
+                skill_data.append({
+                    "id": skill.id,
+                    "name": skill.name,
+                    "bgColor": skill.bgColor,
+                    "color": skill.color,
+                    "icon": skill.icon
+                })
+            all_skills = db.query(Skill).all()
+            all_skills_data = []
+            for skill in all_skills:
+                all_skills_data.append({
+                    "id": skill.id,
+                    "name": skill.name,
+                    "bgColor": skill.bgColor,
+                    "color": skill.color,
+                    "icon": skill.icon
+                })
+            return {
+                "has_team": True,
+                "team_id": team.id,
+                "team_name": team.name,
+                "members": team_members,
+                "skills": skill_data,
+                "all_skills":  all_skills
             }
-            for member in team.members
-        ]
+        else:
+            invites = user.invites
+            # invites = db.query(TeamInvites).filter(TeamInvites.user_id == user.id).all()
+            invite_data = []
+            for team in invites:
+                data = {}
+                data["team_id"] = team.id
+                data["team_name"] = team.name
+                data["team_members"] = [member.name for member in team.members]
+                invite_data.append(data)
 
-        skills = team.skills
-        skill_data = []
-        for skill in skills:
-            skill_data.append({
-                "id": skill.id,
-                "name": skill.name,
-                "bgColor": skill.bgColor,
-                "color": skill.color,
-                "icon": skill.icon
-            })
-        all_skills = db.query(Skill).all()
-        all_skills_data = []
-        for skill in all_skills:
-            all_skills_data.append({
-                "id": skill.id,
-                "name": skill.name,
-                "bgColor": skill.bgColor,
-                "color": skill.color,
-                "icon": skill.icon
-            })
-        return {
-            "team_id": team.id,
-            "team_name": team.name,
-            "members": team_members,
-            "skills": skill_data,
-            "all_skills":  all_skills
-        }
-        
+            return {
+                "has_team": False,
+                "invites": invite_data
+            }
+
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -2521,11 +2552,14 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
         #     raise ValueError(f"CSV must contain headers: {', '.join(required_headers)}")
         
         # Process each row in CSV
+        unadded_users = []
         for row_num, row in enumerate(csv_reader, start=2):
             try:
-                # Extract and validate username
-                username = row['username'].strip()
-                if not username:
+                # # Extract and validate username
+                # username = row['username'].strip()
+                # Extract and validate roll no
+                roll_no = row['RollNo'].strip()
+                if not roll_no:
                     continue
                 
                 # Extract and validate score
@@ -2534,13 +2568,17 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
                     if score < 0 or score > max_points:
                         raise ValueError(f"Score must be between 0 and {max_points}")
                 except ValueError:
+                    # TODO add the code for skipped these users
+                    continue
                     raise ValueError(f"Invalid score format in row {row_num}")
                 
-                # Get user ID from username
-                user = db.query(User).filter(User.username == username).first()
+                # Get user ID from roll number
+                user = db.query(User).filter(User.id == roll_no).first()
+            
                 if not user:
-                    raise ValueError(f"User with username '{username}' not found")
-                print(user.id)
+                    unadded_users.append(user)
+                    continue
+                print("Added user id:", user.id)
                 scores.append({
                     'user_id': user.id,
                     'gradeable_id': gradeable_id,
@@ -4198,7 +4236,83 @@ from sqlalchemy.orm import Session
 async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Invalid file format. Please upload a CSV file.")
+        # Read the CSV file and extract data
+    try:
+        contents = await file.read()
+        text_contents = contents.decode('utf-8')
+        df = pd.read_csv(StringIO(text_contents))
+        
+        # Validate required columns
+        required_columns = ['RollNo', 'TeamID']
+        for column in required_columns:
+            if column not in df.columns:
+                raise HTTPException(status_code=400, detail=f"Missing required column: {column}")
+        
+        # Group students by team ID
+        team_to_users = {}
+        for _, row in df.iterrows():
+            roll_no = row['RollNo']
+            team_id = row['TeamID']
+            
+            # Skip rows with empty team IDs
+            if pd.isna(team_id) or pd.isna(roll_no):
+                continue
+            
+            team_id = int(team_id)
+            if team_id not in team_to_users:
+                team_to_users[team_id] = []
+            
+            # Find the user with this roll number
+            user = db.query(User).filter(User.id == roll_no).first()
+            if not user:
+                raise HTTPException(status_code=400, detail=f"User with Roll No {roll_no} not found")
+            
+            team_to_users[team_id].append(user)
+        
+        # Create or update teams
+        created_teams = []
+        updated_teams = []
+        for team_id, users in team_to_users.items():
+            print("Handling team id:", team_id)
+            # Check if team already exists
+            team = db.query(Team).filter(Team.id == team_id).first()
+            
+            if team:
+                # Update existing team
+                for user in users:
+                    if user not in team.members:
+                        team.members.append(user)
+                        user.team_id = team.id
+                updated_teams.append(team_id)
+            else:
+                # Create new team
+                team = Team(id=team_id, name=f"Team {team_id}")
+                db.add(team)
+                db.flush()  # Get the ID without committing
+                
+                for user in users:
+                    team.members.append(user)
+                    user.team_id = team.id
+                created_teams.append(team_id)
+        
+        db.commit()
+        
+        return {
+            "message": "Teams created and updated successfully",
+            "created_teams": created_teams,
+            "updated_teams": updated_teams,
+            "total_teams": len(team_to_users),
+            "total_students_assigned": sum(len(users) for users in team_to_users.values())
+        }
+    except HTTPException as e:
+        db.rollback()
+        raise e
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
 
+
+    # outdated code
     try:
         # Save the uploaded file to a temporary location
         temp_file_path = f"temp_{file.filename}"
@@ -4315,6 +4429,15 @@ class ResetPasswordWithOTPModel(BaseModel):
     otp: str
     new_password: str
     confirm_password: str
+
+class InviteUserModel(BaseModel):
+    user_id: int
+
+class TeamCreateModel(BaseModel):
+    name: str
+
+class JoinTeamModel(BaseModel):
+    team_id: int
 
 # Generate a cryptographically secure OTP
 def generate_secure_otp(length=6):
@@ -5634,7 +5757,7 @@ async def update_team_tas(
             detail=f"Error updating TA assignments: {str(e)}"
         )
 
-@app.get("/user/me")
+@app.get("/users/me")
 async def get_user_data(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
@@ -5693,3 +5816,181 @@ async def get_user_data(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error fetching user data: {str(e)}"
         )
+
+@app.get("/teams/get-invites")
+async def get_invites(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    user = current_user["user"]
+
+    # Check if user is a student
+    if current_user["role"] != RoleType.STUDENT:
+        raise HTTPException(status_code=403, detail="Only students can view invites")
+
+    # Check if he is already in a team    
+    if user.teams:
+        raise HTTPException(status_code=400, detail="You are already in a team")
+
+    invites = user.invites
+    # invites = db.query(TeamInvites).filter(TeamInvites.user_id == user.id).all()
+    invite_data = []
+    for team in invites:
+        data = {}
+        data["team_id"] = team.id
+        data["team_name"] = team.name
+        data["team_members"] = [member.name for member in team.members]
+        invite_data.append(data)
+
+    return {"invites": invite_data}
+
+@app.post("/teams/invite")
+async def invite_to_team(
+    invite: InviteUserModel,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        invited_user_id = int(invite.user_id)  # Update to use invite.user_id
+        user = current_user["user"]
+
+        # Ensure user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(status_code=403, detail="Only students can join teams")
+
+        if not user.teams:
+            raise HTTPException(status_code=400, detail="You are not in a team")
+        
+        # Additional logic for inviting to a team goes here
+        # ...
+        # For example, you might want to check if the user is a team leader or has permission to invite others
+
+        # TODO: Check if the user is a team leader and implement team leader and stuff
+
+        # Check if the invited user exists
+        invited_user = db.query(User).filter(User.id == invited_user_id).first()
+        if not invited_user:
+            raise HTTPException(status_code=404, detail="Invited user not found")
+        
+        # Check if invited user is in a team
+        if invited_user.team_id or invited_user.teams:
+            raise HTTPException(status_code=400, detail="Invited user is already in a team")
+        
+        team = user.teams[0]
+        # Check if the team already has an invite for the user
+        if invited_user in team.invites:
+            raise HTTPException(status_code=400, detail="User already invited to this team")
+
+        team.invites.append(invited_user)  # Assuming the relationship is set up correctly
+        db.commit()
+        return {"detail": "User invited to team successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") # TODO: Do I need to change this
+    
+@app.get("/teams/outgoing-invites")
+async def get_outgoing_invites(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        user = current_user["user"]
+
+        # Ensure user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(status_code=403, detail="Only students can view outgoing invites")
+
+        if not user.teams or not user.team_id:
+            raise HTTPException(status_code=400, detail="You are not in a team")
+        
+        team = user.teams[0]
+        # Fetch outgoing invites for the user's team
+        outgoing_invites = team.invites  # Assuming the relationship is set up correctly
+        
+        invite_data = {}
+        invite_data["team_id"] = user.team_id
+        invite_data["team_name"] = team.name
+        invite_data["data"] = []
+        for invite in outgoing_invites:
+            data = {}
+            data["invited_user_id"] = invite.user_id
+            data["invited_user_name"] = invite.name
+            invite_data["data"].append(data)
+
+        return {"outgoing_invites": invite_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") # TODO: Do I need to change this
+
+
+@app.post("/teams/join")
+async def join_team(
+    invite: JoinTeamModel,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    invite_team_id = int(invite.team_id)  # Update to use invite.team_id
+    user = current_user["user"]
+    # Check if user is a student
+    if current_user["role"] != RoleType.STUDENT:
+        raise HTTPException(status_code=403, detail="Only students can join teams")
+    
+    # Check if he is already in a team
+    if user.teams:
+        raise HTTPException(status_code=400, detail="You already belong to a team!")
+    
+    # Check if team invite exists
+    
+    for team in user.invites:
+        if team.id == invite_team_id:
+            team_id = team.id
+            break
+    else:
+        raise HTTPException(status_code=404, detail="Invite not found")
+
+    
+    team = db.query(Team).filter(Team.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found. It might have been deleted")
+
+    user.team_id = team.id
+    team.members.append(user)
+    db.commit()
+    db.refresh(team)
+
+    return {"detail": "Successfully joined the team", "team_id": team.id, "team_name": team.name}
+
+@app.post("/teams/create")
+async def create_team(
+    team: TeamCreateModel,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    team_name = team.name
+    user = current_user["user"]
+    # Check if user is a student
+    if current_user["role"] != RoleType.STUDENT:
+        raise HTTPException(status_code=403, detail="Only students can create teams")
+    # Check if user has an existing team
+
+    if user.teams:
+        raise HTTPException(status_code=400, detail="You already belong to a team!")
+    
+    # Check if team name is already taken
+    existing_team = db.query(Team).filter(Team.name == team_name).first()
+    if existing_team:
+        raise HTTPException(status_code=400, detail="Team name already taken")
+    
+    # Create new team
+    new_team = Team(
+        name=team_name
+    )
+    db.add(new_team)
+    db.commit()
+    db.refresh(new_team)
+    # Add user to the team
+    user.team_id = new_team.id
+    new_team.members.append(user)
+
+    db.commit()
+    db.refresh(new_team)
+
+    return {"team_id": new_team.id, "team_name": new_team.name, "members": [member.name for member in new_team.members]}
