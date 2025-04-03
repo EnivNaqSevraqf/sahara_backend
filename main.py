@@ -4473,12 +4473,12 @@ async def request_otp(request: RequestOTPModel, db: Session = Depends(get_db)):
         user = db.query(User).filter(User.email == request.email).first()
         
         if not user:
-            # For security, we still return the same message
-            # but we'll log this for debugging
+            # For security, we return a similar message but with a special status code
+            # that the frontend can use to show a helpful message
             print(f"OTP request for non-existent email: {request.email}")
             return {
                 "message": "If the email exists in our system, a verification code has been sent. Please check your spam folder if you don't see it in your inbox.",
-                "status": "email_not_found"  # Add a status for debugging only
+                "status": "user_not_found"  # Changed this to be more semantic
             }
         
         # Generate secure OTP
