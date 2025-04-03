@@ -23,7 +23,7 @@ class Show(BaseModel):
         orm_mode = True
 
 router = APIRouter(
-    prefix="/api/announcements",
+    prefix="/announcements",
     tags=["API Announcements"]
 )
 
@@ -35,23 +35,28 @@ async def create(
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    print(f"DEBUG: POST / route called - title: {title}, description length: {len(description)}")
+    print(f"DEBUG: Request file: {file.filename if file else 'No file'}")
+    print(f"DEBUG: Current user role: {current_user['role'].value}")
     try:
         # Check if user is professor
         if current_user["role"].value != "prof":
+            print(f"DEBUG: Permission denied - user role: {current_user['role'].value}")
             raise HTTPException(
                 status_code=403,
                 detail="Only professors can create announcements"
             )
             
         user = current_user["user"]
+        print(f"DEBUG: User ID: {user.id}, Username: {user.username}")
         # Create announcement
         announcement = Announcement(
             title=title,
             content=description,
             creator_id=user.id
         )
+        print(f"DEBUG: Created announcement object with title: {title}")
 
-        print("Here")
 
         # Handle file upload if provided
         if file:
@@ -128,47 +133,12 @@ async def download_announcement_file(
                 "Content-Disposition": f'attachment; filename="{announcement.url_name}"'
             }
         )
+    except HTTPException as he:
+        raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
-async def download_announcement_file(
-    id: int,
-    db: Session = Depends(get_db)
-):
-    try:
-        announcement = db.query(Announcement).filter(Announcement.id == id).first()
-        if not announcement or not announcement.url_name:
-            raise HTTPException(status_code=404, detail="File not found")
-        
-        file_path = os.path.join("uploads", announcement.url_name)
-        if not os.path.exists(file_path):
-            raise HTTPException(status_code=404, detail="File not found")
-        
-        # Determine content type based on file extension
-        file_extension = os.path.splitext(announcement.url_name)[1].lower()
-        content_type = {
-            '.pdf': 'application/pdf',
-            '.doc': 'application/msword',
-            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.png': 'image/png',
-            '.txt': 'text/plain'
-        }.get(file_extension, 'application/octet-stream')
-        
-        return FileResponse(
-            file_path,
-            filename=announcement.url_name,
-            media_type=content_type,
-            headers={
-                "Content-Disposition": f'attachment; filename="{announcement.url_name}"'
-            }
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.get('/announcements', response_model=List[Show])
+@router.get('/', response_model=List[Show])
 def all(db: Session = Depends(get_db)):
     try:
         announcements = db.query(Announcement).order_by(Announcement.created_at.desc()).all()
@@ -180,7 +150,7 @@ def all(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get('/announcements/{id}', status_code=200, response_model=Show)
+@router.get('/{id}', status_code=200, response_model=Show)
 def show(id: int, db: Session = Depends(get_db)):
     try:
         announcement = db.query(Announcement).filter(Announcement.id == id).first()
@@ -188,42 +158,9 @@ def show(id: int, db: Session = Depends(get_db)):
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id {id} not found')
         return announcement
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Error fetching announcement")
 
-# @app.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
-# def destroy(id: int, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
-#     try:
-#         # Check if user is admin
-#         if current_user["role"] not in [RoleType.PROF]:
-#             raise HTTPException(
-#                 status_code=403,
-#                 detail="Only professors and teaching assistants can delete announcements"
-#             )
-
-#         announcement = db.query(Announcement).filter(Announcement.id == id).first()
-#         if not announcement:
-#             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
-        
-#         # Delete the associated file if it exists
-#         if announcement.url_name:
-#             file_path = os.path.join("uploads", announcement.url_name)
-#             if os.path.exists(file_path):
-#                 try:
-#                     os.remove(file_path)
-#                 except OSError:
-#                     pass  # Ignore file deletion errors during cleanup
-#             raise HTTPException(status_code=500, detail="Failed to delete announcement file")
-        
-#         # Delete the announcement from database
-#         db.delete(announcement)
-#         db.commit()
-        
-#         return {'message': 'Announcement deleted successfully'}
-#     except Exception as e:
-#         db.rollback()
-#         raise HTTPException(status_code=500, detail=f"Error deleting announcement: {str(e)}")
-
-@router.delete('/announcements/{id}', status_code=status.HTTP_204_NO_CONTENT)
+@router.delete('/{id}', status_code=status.HTTP_204_NO_CONTENT)
 def destroy(
     id: int, 
     current_user: dict = Depends(get_current_user),
@@ -233,7 +170,7 @@ def destroy(
        
         if current_user["role"].value != "prof":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only professors can delete announcements")
-        print("Here")
+        
         announcement = db.query(Announcement).filter(Announcement.id == id).first()
         if not announcement:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f'Announcement with id: {id} not found')
