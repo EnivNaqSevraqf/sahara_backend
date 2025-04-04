@@ -34,7 +34,7 @@ def login(request: Annotated[OAuth2PasswordRequestForm, Depends()], db: Session 
         # Generate token
         token = generate_token(
             {"sub": user.username}, 
-            timedelta(days=1)
+            timedelta(minutes=180) 
         )
         
         return {
