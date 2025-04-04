@@ -1,4 +1,5 @@
-from sqlalchemy import Column, Integer, ForeignKey, Table
+from sqlalchemy import Column, Integer, ForeignKey, Table, String
+from datetime import datetime, timezone
 from ..database.db import Base
 
 # Association table for User-Skills many-to-many relationship
@@ -21,3 +22,10 @@ team_members = Table(
     Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
     Column("user_id", Integer, ForeignKey("users.id"), primary_key=True)
 ) 
+# Define the invites association table
+invites = Table(
+    "invites", Base.metadata,
+    Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("invited_at", String, default=datetime.now(timezone.utc).isoformat())
+)

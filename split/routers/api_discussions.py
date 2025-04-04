@@ -15,9 +15,11 @@ import os
 import uuid
 import json
 from base64 import b64decode, b64encode
+from ..websocket.websocket import manager
+from fastapi.websockets import WebSocketDisconnect
 
 router = APIRouter(
-    prefix="/api/discussions",
+    prefix="",
     tags=["API Discussions"]
 )
 
@@ -26,6 +28,7 @@ async def get_discussions_page(
     current_user_data: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+
     user = current_user_data["user"]
     if not user:
         raise HTTPException(status_code=404, detail=f"User not found: {user.name}")
