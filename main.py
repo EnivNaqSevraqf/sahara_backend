@@ -5994,3 +5994,145 @@ async def create_team(
     db.refresh(new_team)
 
     return {"team_id": new_team.id, "team_name": new_team.name, "members": [member.name for member in new_team.members]}
+
+
+@app.put("/api/users/skills")  # Changed from POST to PUT and updated endpoint path
+async def update_user_skills(
+    request: dict,  # Changed to accept request body as dict
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update skills for the currently logged in TA"""
+    try:
+        user = current_user["user"]
+        
+        # Check if user is a TA
+        if current_user["role"] != RoleType.TA:
+            raise HTTPException(
+                status_code=403,
+                detail="Only TAs can update their skills"
+            )
+        
+        # Get skill_ids from request body
+        skill_ids = request.get("skill_ids", [])
+        if not isinstance(skill_ids, list):
+            raise HTTPException(
+                status_code=400,
+                detail="skill_ids must be a list of integers"
+            )
+        
+        # Get all skills by IDs
+        skills = db.query(Skill).filter(Skill.id.in_(skill_ids)).all()
+        if len(skills) != len(skill_ids):
+            raise HTTPException(
+                status_code=400, 
+                detail="Some skill IDs are invalid"
+            )
+        
+        # Clear existing skills and assign new ones
+        user.skills = skills
+        db.commit()
+        
+        # Format response
+        updated_skills = []
+        for skill in skills:
+            updated_skills.append({
+                "id": skill.id,
+                "name": skill.name,
+                "bgColor": skill.bgColor,
+                "color": skill.color,
+                "icon": skill.icon
+            })
+        
+        return JSONResponse(
+            status_code=200,
+            content=updated_skills  # Return just the skills array to match frontend expectation
+        )
+    
+    except HTTPException as he:
+        db.rollback()
+        raise he
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error updating skills: {str(e)}"
+        )
+
+@app.get("/api/skills")
+async def get_all_available_skills(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all available skills from the database"""
+    try:
+        # Only TAs can access skills
+        if current_user["role"] != RoleType.TA:
+            raise HTTPException(
+                status_code=403,
+                detail="Only TAs can view and manage skills"
+            )
+
+        # Query all skills from the database
+        skills = db.query(Skill).all()
+        
+        # Format the response
+        formatted_skills = []
+        for skill in skills:
+            formatted_skills.append({
+                "id": skill.id,
+                "name": skill.name,
+                "bgColor": skill.bgColor,
+                "color": skill.color,
+                "icon": skill.icon
+            })
+
+        return JSONResponse(status_code=200, content=formatted_skills)
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching skills: {str(e)}"
+        )
+
+@app.get("/api/users/skills")
+async def get_user_skills(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get currently logged-in TA's skills"""
+    try:
+        user = current_user["user"]
+        
+        # Check if user is a TA
+        if current_user["role"] != RoleType.TA:
+            raise HTTPException(
+                status_code=403,
+                detail="Only TAs can view their skills"
+            )
+
+        # Get user's current skills
+        skills = user.skills
+        
+        # Format the response
+        formatted_skills = []
+        for skill in skills:
+            formatted_skills.append({
+                "id": skill.id,
+                "name": skill.name,
+                "bgColor": skill.bgColor,
+                "color": skill.color,
+                "icon": skill.icon
+            })
+
+        return JSONResponse(status_code=200, content=formatted_skills)
+
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching user skills: {str(e)}"
+        )

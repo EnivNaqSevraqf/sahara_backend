@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship
 from ..database.db import Base
-from .associations import team_skills, team_members
+from .associations import team_skills, team_members, invites
 
 class Team(Base):
     __tablename__ = "teams"
@@ -11,3 +11,7 @@ class Team(Base):
     members = relationship("User", secondary=team_members, back_populates="teams")
     skills = relationship("Skill", secondary=team_skills, back_populates="teams")
     submissions = relationship("Submission", back_populates="team") 
+    # 
+    feedback_submissions = relationship("FeedbackSubmission", back_populates="team")
+    invites = relationship("User", secondary=invites, back_populates="invites")
+    # 

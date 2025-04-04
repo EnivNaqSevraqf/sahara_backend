@@ -1,7 +1,7 @@
 from sqlalchemy import Column, Integer, String, ForeignKey
 from sqlalchemy.orm import relationship, validates
 from ..database.db import Base
-from .associations import user_skills
+from .associations import user_skills, team_members, invites
 from ..config.config import SessionLocal
 from ..models.roles import RoleType, Role
 from .form_response import FormResponse
@@ -28,8 +28,10 @@ class User(Base):
     assignables = relationship("Assignable", back_populates="creator", lazy="joined")
     assignments = relationship("Assignment", back_populates="user", lazy="joined")
     messages = relationship("Message", back_populates="sender", lazy="joined")
+    feedback_submissions = relationship("FeedbackSubmission", foreign_keys="FeedbackSubmission.submitter_id", back_populates="submitter", lazy="joined")
+    feedback_details = relationship("FeedbackDetail", foreign_keys="FeedbackDetail.member_id", back_populates="member", lazy="joined")
+    invites = relationship("Team", secondary="invites", back_populates="invites")
     
-
     @validates('skills')
     def validate_skills(self, key, skill):
         with SessionLocal() as db:
