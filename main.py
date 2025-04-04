@@ -5481,6 +5481,7 @@ async def get_assignable_assignments(
         if current_user["role"] == RoleType.STUDENT:
             raise HTTPException(status_code=403, detail="Only professors or TA can view all assignments")
         
+        # Get the assignable
         assignable = db.query(Assignable).filter(Assignable.id == assignable_id).first()
         if not assignable:
             raise HTTPException(status_code=404, detail="Assignable not found")
@@ -5491,14 +5492,19 @@ async def get_assignable_assignments(
         for assignment in assignments:
             assignment_data = {
                 "id": assignment.id,
-                "team_id": assignment.user_id,
+                "user_id": assignment.user_id,
                 "submitted_on": assignment.submitted_on,
                 "score": assignment.score,
                 "max_score": assignable.max_score,
                 "file": {
                     "file_url": assignment.file_url,
                     "original_filename": assignment.original_filename
-                }
+                },
+                "user": {
+                    "id": assignment.user.id,
+                    "name": assignment.user.name,
+                    "email": assignment.user.email
+                } if assignment.user else None
             }
             result.append(assignment_data)
         
