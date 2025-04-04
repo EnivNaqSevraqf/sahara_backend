@@ -17,11 +17,11 @@ from typing import Optional
 import shutil
 
 router = APIRouter(
-    
+    prefix="/assignables",
     tags=["Assignables"]
 )
 
-@router.post("/assignables/{assignable_id}/submit")
+@router.post("/{assignable_id}/submit")
 async def submit_file(
     assignable_id: int,
     file: UploadFile = File(...),  # Now accepts a single file
@@ -102,7 +102,7 @@ async def submit_file(
 
 
 
-@router.get("/assignables/")
+@router.get("/")
 async def get_assignables(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
@@ -168,7 +168,7 @@ async def get_assignables(
         raise HTTPException(status_code=500, detail=f"Error fetching assignables: {str(e)}")
     
 # this is to download the reference file for an assignable, done by students and profs
-@router.get("/assignables/{assignable_id}/reference-files/download")
+@router.get("/{assignable_id}/reference-files/download")
 async def download_reference_file(
     assignable_id: int,
     db: Session = Depends(get_db),
@@ -201,7 +201,7 @@ async def download_reference_file(
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
     
 # this is to create a new submittable, done by profs
-@router.post("/assignables/create")
+@router.post("/create")
 async def create_assignable(
     title: str = FastAPIForm(...),
     deadline: str = FastAPIForm(...),
@@ -312,7 +312,7 @@ async def create_assignable(
         raise HTTPException(status_code=500, detail=f"Error creating assignable: {str(e)}")
 
 # this is to get details of a specific assignable, done by students and profs
-@router.get("/assignables/{assignable_id}")
+@router.get("/{assignable_id}")
 async def get_assignable(
     assignable_id: int,
     db: Session = Depends(get_db),
@@ -343,7 +343,7 @@ async def get_assignable(
         raise HTTPException(status_code=500, detail=f"Error fetching assignable: {str(e)}")
 
 # this is to get all assignments for an assignable, done by profs
-@router.get("/assignables/{assignable_id}/assignments")
+@router.get("/{assignable_id}/assignments")
 async def get_assignable_assignments(
     assignable_id: int,
     db: Session = Depends(get_db),
@@ -382,7 +382,7 @@ async def get_assignable_assignments(
         raise HTTPException(status_code=500, detail=f"Error fetching assignments: {str(e)}")
 
 # this is to delete a assignable and all its assignments, done by profs
-@router.delete("/assignables/{assignable_id}")
+@router.delete("/{assignable_id}")
 async def delete_assignable(
     assignable_id: int,
     db: Session = Depends(get_db),
@@ -423,7 +423,7 @@ async def delete_assignable(
         raise HTTPException(status_code=500, detail=f"Error deleting assignable: {str(e)}")
     
 # this is to update a assignable, done by profs
-@router.put("/assignables/{assignable_id}")
+@router.put("/{assignable_id}")
 async def update_assignable(
     assignable_id: int,
     title: str = FastAPIForm(...),
