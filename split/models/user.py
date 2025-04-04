@@ -32,13 +32,13 @@ class User(Base):
     feedback_details = relationship("FeedbackDetail", foreign_keys="FeedbackDetail.member_id", back_populates="member", lazy="joined")
     invites = relationship("Team", secondary="invites", back_populates="invites")
     
-    @validates('skills')
-    def validate_skills(self, key, skill):
-        with SessionLocal() as db:
-            role = db.query(Role).filter_by(id=self.role_id).first()
-            if role and role.role != RoleType.TA:
-                raise ValueError("Only TAs can have skills.")
-        return skill
+    # @validates('skills')
+    # def validate_skills(self, key, skill):
+    #     with SessionLocal() as db:
+    #         role = db.query(Role).filter_by(id=self.role_id).first()
+    #         if role and role.role != RoleType.TA:
+    #             raise ValueError("Only TAs can have skills.")
+    #     return skill
 
 
 class Prof(Base):
