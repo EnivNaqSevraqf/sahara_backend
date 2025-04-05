@@ -18,7 +18,7 @@ router = APIRouter(
 )
 
 
-@router.post("/create")
+@router.post("/create") 
 async def api_create_form(form_data: FormCreateRequest, db: Session = Depends(get_db)):
     """Create a new form"""
     result = create_form_db(form_data, db)

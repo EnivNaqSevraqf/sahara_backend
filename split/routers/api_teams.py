@@ -16,6 +16,15 @@ from ..schemas.team_schemas import TeamNameUpdateRequest, UpdateTAsRequest
 import os
 from ..models.team_ta import Team_TA
 
+class InviteUserModel(BaseModel):
+    user_id: int
+
+class JoinTeamModel(BaseModel):
+    team_id: int
+
+class TeamCreateModel(BaseModel):
+    name: str
+
 router = APIRouter()
 
 #this endpoint is also not used in the frontend
@@ -316,9 +325,9 @@ async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
             team_name = row['team_name']
             members = []
             for i in range(1, 11):
-                members.append(row[f'member{i}'])
-
-            # members = [row[f'member{i}'] for i in range(1, 11) if pd.notna(row[f'member{i}'])]
+                member = row[f'member{i}']
+                if pd.notna(member) and member.strip():  # Add check for empty strings
+                    members.append(member)
 
             if team_name in team_names:
                 raise HTTPException(status_code=400, detail=f"Invalid file: Duplicate team name '{team_name}' found.")
@@ -335,59 +344,36 @@ async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
                     raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is assigned to multiple teams.")
             members_set.append(members)
 
-        # Get the highest team ID present in the database
-        # max_team_id = db.query(func.max(Team.id)).scalar() or 0
-
-
         team_names = list(team_names)
         print("Team names: ", team_names)
         print("Members set:", members_set)
+        
         for i in range(len(team_names)):
             team_name = team_names[i]
             members = members_set[i]
-            team = Team(name = team_name)
+            # print(members)
+            # Create and save the team first
+            team = Team(name=team_name)
             db.add(team)
+            db.commit()  # Commit to get the team ID
+            db.refresh(team)  # Make sure we have the latest data including the ID
+            
+            # Now add users to the team with the valid team ID
             for member in members:
                 user = db.query(User).filter_by(username=member).first()
                 print("Over here")
                 if user:
                     team.members.append(user)
-                    user.team_id = team.id
-        db.commit()
-
-        
-        # Process each row in the CSV file
-        # for _, row in 
-        #     team_name = row['team_name']
-        #     members = []
-        #     for i in range(10):
-        #         print(row[f'member{i}'])
-        #         members.append(row[f'member{i}'])
-        #     print(members)
-        #     # Create a new team
-        #     team = Team(name=team_name)
-        #     db.add(team)
-
-        #     # Add members to the team
-        #     for member_name in members:
-        #         user = db.query(User).filter_by(name=member_name).first()
-        #         if user:
-        #             # check if user is in team already
-        #             # if user not in team.members:
-        #             #     # check if user is already in a team
-        #             #     if user.team_id is None:
-        #             #         # Add the user to the team
-        #             team.members.append(user)
-        #             user.team_id = team.id  # Assign the team ID to the user
-        #             print("Added user to team:", user.name, "in team:", team.name)
-        # print("Committed the changes")
-        # db.commit()
+                    user.team_id = team.id  # Now team.id is valid
+            
+            db.commit()  # Commit changes for this team's users
 
         # Clean up the temporary file
         os.remove(temp_file_path)
 
         return {"detail": "File uploaded and data saved successfully!"}
     except Exception as e:
+        db.rollback()  # In case of error, rollback
         raise HTTPException(status_code=500, detail=str(e))
     
 
@@ -440,3 +426,201 @@ async def update_team_tas(
             status_code=500,
             detail=f"Error updating TA assignments: {str(e)}"
         )
+
+@router.get("/teams/get-invites")
+async def get_invites(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    # Get user ID from current_user
+    user_id = current_user["user"].id
+        
+    # Query for the user again with the current session
+    user = db.query(User).filter(User.id == user_id).first()
+
+    # Check if user is a student
+    if current_user["role"] != RoleType.STUDENT:
+        raise HTTPException(status_code=403, detail="Only students can view invites")
+
+    # Check if he is already in a team    
+    if user.teams:
+        raise HTTPException(status_code=400, detail="You are already in a team")
+
+    invites = user.invites
+    # invites = db.query(TeamInvites).filter(TeamInvites.user_id == user.id).all()
+    invite_data = []
+    for team in invites:
+        data = {}
+        data["team_id"] = team.id
+        data["team_name"] = team.name
+        data["team_members"] = [member.name for member in team.members]
+        invite_data.append(data)
+
+    return {"invites": invite_data}
+
+@router.post("/teams/invite")
+async def invite_to_team(
+    invite: InviteUserModel,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        invited_user_id = int(invite.user_id)  # Update to use invite.user_id
+        # Get user ID from current_user
+        user_id = current_user["user"].id
+            
+        # Query for the user again with the current session
+        user = db.query(User).filter(User.id == user_id).first()
+
+
+        # Ensure user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(status_code=403, detail="Only students can join teams")
+
+        if not user.teams:
+            raise HTTPException(status_code=400, detail="You are not in a team")
+        
+        # Additional logic for inviting to a team goes here
+        # ...
+        # For example, you might want to check if the user is a team leader or has permission to invite others
+
+        # TODO: Check if the user is a team leader and implement team leader and stuff
+
+        # Check if the invited user exists
+        invited_user = db.query(User).filter(User.id == invited_user_id).first()
+        if not invited_user:
+            raise HTTPException(status_code=404, detail="Invited user not found")
+        
+        # Check if invited user is in a team
+        if invited_user.team_id or invited_user.teams:
+            raise HTTPException(status_code=400, detail="Invited user is already in a team")
+        
+        team = user.teams[0]
+        # Check if the team already has an invite for the user
+        if invited_user in team.invites:
+            raise HTTPException(status_code=400, detail="User already invited to this team")
+
+        team.invites.append(invited_user)  # Assuming the relationship is set up correctly
+        db.commit()
+        return {"detail": "User invited to team successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") # TODO: Do I need to change this
+    
+@router.get("/teams/outgoing-invites")
+async def get_outgoing_invites(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    try:
+        # Get user ID from current_user
+        user_id = current_user["user"].id
+            
+        # Query for the user again with the current session
+        user = db.query(User).filter(User.id == user_id).first()
+
+        # Ensure user is a student
+        if current_user["role"] != RoleType.STUDENT:
+            raise HTTPException(status_code=403, detail="Only students can view outgoing invites")
+
+        if not user.teams or not user.team_id:
+            raise HTTPException(status_code=400, detail="You are not in a team")
+        
+        team = user.teams[0]
+        # Fetch outgoing invites for the user's team
+        outgoing_invites = team.invites  # Assuming the relationship is set up correctly
+        
+        invite_data = {}
+        invite_data["team_id"] = user.team_id
+        invite_data["team_name"] = team.name
+        invite_data["data"] = []
+        for invite in outgoing_invites:
+            data = {}
+            data["invited_user_id"] = invite.user_id
+            data["invited_user_name"] = invite.name
+            invite_data["data"].append(data)
+
+        return {"outgoing_invites": invite_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}") # TODO: Do I need to change this
+
+@router.post("/teams/join")
+async def join_team(
+    invite: JoinTeamModel,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    invite_team_id = int(invite.team_id)  # Update to use invite.team_id
+    # Get user ID from current_user
+    user_id = current_user["user"].id
+        
+    # Query for the user again with the current session
+    user = db.query(User).filter(User.id == user_id).first()
+    # Check if user is a student
+    if current_user["role"] != RoleType.STUDENT:
+        raise HTTPException(status_code=403, detail="Only students can join teams")
+    
+    # Check if he is already in a team
+    if user.teams:
+        raise HTTPException(status_code=400, detail="You already belong to a team!")
+    
+    # Check if team invite exists
+    
+    for team in user.invites:
+        if team.id == invite_team_id:
+            team_id = team.id
+            break
+    else:
+        raise HTTPException(status_code=404, detail="Invite not found")
+
+    
+    team = db.query(Team).filter(Team.id == team_id).first()
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found. It might have been deleted")
+
+    user.team_id = team.id
+    team.members.append(user)
+    db.commit()
+    db.refresh(team)
+
+    return {"detail": "Successfully joined the team", "team_id": team.id, "team_name": team.name}
+
+@router.post("/teams/create")
+async def create_team(
+    team: TeamCreateModel,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    team_name = team.name
+    # Get user ID from current_user
+    user_id = current_user["user"].id
+        
+    # Query for the user again with the current session
+    user = db.query(User).filter(User.id == user_id).first()
+    # Check if user is a student
+    if current_user["role"] != RoleType.STUDENT:
+        raise HTTPException(status_code=403, detail="Only students can create teams")
+    # Check if user has an existing team
+
+    if user.teams:
+        raise HTTPException(status_code=400, detail="You already belong to a team!")
+    
+    # Check if team name is already taken
+    existing_team = db.query(Team).filter(Team.name == team_name).first()
+    if existing_team:
+        raise HTTPException(status_code=400, detail="Team name already taken")
+    
+    # Create new team
+    new_team = Team(
+        name=team_name
+    )
+    db.add(new_team)
+    db.commit()
+    db.refresh(new_team)
+    # Add user to the team
+    user.team_id = new_team.id
+    new_team.members.append(user)
+
+    db.commit()
+    db.refresh(new_team)
+
+    return {"team_id": new_team.id, "team_name": new_team.name, "members": [member.name for member in new_team.members]}

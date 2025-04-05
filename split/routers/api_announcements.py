@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File,
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 from typing import List, Optional
+from datetime import datetime, timezone
 from ..database.db import get_db
 from ..models.announcement import Announcement
 from ..models.user import User
@@ -53,7 +54,8 @@ async def create(
         announcement = Announcement(
             title=title,
             content=description,
-            creator_id=user.id
+            creator_id=user.id,
+            created_at=datetime.now(timezone.utc).isoformat()
         )
         print(f"DEBUG: Created announcement object with title: {title}")
 
