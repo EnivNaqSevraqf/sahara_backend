@@ -39,7 +39,7 @@ async def create_match(n: int, db: Session = Depends(get_db), token: str = Depen
     
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/", response_model=dict)
 async def get_match(db: Session = Depends(get_db)):
@@ -85,5 +85,5 @@ async def get_match(db: Session = Depends(get_db)):
         return {"teams": results}
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     

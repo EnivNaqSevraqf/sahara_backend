@@ -181,7 +181,7 @@ async def submit_file(
 
 
 
-@router.get("/assignables")
+@router.get("/assignables/")
 async def get_assignables(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)

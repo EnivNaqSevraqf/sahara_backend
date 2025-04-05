@@ -9,7 +9,7 @@ from ..crud.gradeables import parse_scores_from_csv
 from fastapi.responses import JSONResponse
 
 router = APIRouter(
-    prefix="/api/gradeables",
+    prefix="",
     tags=["API Gradeables"]
 )
 
@@ -216,6 +216,6 @@ async def create_gradeable(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Error creating gradeable: {str(e)}"
+            detail="Internal server error"
         )
 
