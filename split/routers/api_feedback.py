@@ -90,7 +90,7 @@ async def get_student_feedback_info(
     except HTTPException as he:
         raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("/feedback/student/submit")
 async def submit_student_feedback(
@@ -180,7 +180,7 @@ async def submit_student_feedback(
         raise he
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/feedback/admin")
 async def get_admin_feedback(
@@ -230,7 +230,7 @@ async def get_admin_feedback(
     except HTTPException as he:
         raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/feedback/admin/view/{team_id}")
 async def get_team_feedback_details(
@@ -306,7 +306,7 @@ async def get_team_feedback_details(
     except HTTPException as he:
         raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/feedback/students")
 async def get_student_feedback_info(
@@ -385,7 +385,7 @@ async def get_student_feedback_info(
     except HTTPException as he:
         raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.post("/feedback/student/submit")
 async def submit_student_feedback(
@@ -475,7 +475,7 @@ async def submit_student_feedback(
         raise he
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/feedback/admin")
 async def get_admin_feedback(
@@ -525,7 +525,7 @@ async def get_admin_feedback(
     except HTTPException as he:
         raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.get("/feedback/admin/view/{team_id}")
 async def get_team_feedback_details(
@@ -601,4 +601,4 @@ async def get_team_feedback_details(
     except HTTPException as he:
         raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
