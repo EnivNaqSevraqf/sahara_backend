@@ -126,7 +126,6 @@ def validate_channel_access(user: User, channel_id: int, db: Session) -> bool:
     Returns:
         bool: True if user has access, False otherwise
     """
-    # Get the channel
     channel = db.query(Channel).filter(Channel.id == channel_id).first()
     if not channel:
         return False
@@ -137,18 +136,14 @@ def validate_channel_access(user: User, channel_id: int, db: Session) -> bool:
         
     # For team channels:
     if channel.type == 'team':
-        # # If user is a professor, allow access
-        # if user.role.role == RoleType.PROF:
-        #     return True
-        # For students and TAs, check if they're in the team
-        #return any(team.id == channel.team_id for team in user.teams)
+        # Only students can access team channels
         return user.team_id == channel.team_id
         
     # For TA-team channels:
     if channel.type == 'ta-team':
-        # # If user is a professor, allow access
-        # if user.role.role == RoleType.PROF:
-        #     return True
+        # Professors can access all TA-team channels
+        if user.role.role == RoleType.PROF:
+            return True
         # If user is a TA, check if they're assigned to the team
         if user.role.role == RoleType.TA:
             ta_assignment = db.query(Team_TA).filter(
@@ -158,7 +153,6 @@ def validate_channel_access(user: User, channel_id: int, db: Session) -> bool:
             return ta_assignment is not None
         # If user is a student, check if they're in the team
         if user.role.role == RoleType.STUDENT:
-            #return any(team.id == channel.team_id for team in user.teams)
             return user.team_id == channel.team_id  
             
     return False
