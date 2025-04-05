@@ -16,13 +16,9 @@ from ..schemas.team_schemas import TeamNameUpdateRequest, UpdateTAsRequest
 import os
 from ..models.team_ta import Team_TA
 
-
-
-
 router = APIRouter()
 
-
-
+#this endpoint is also not used in the frontend
 @router.get("/team")
 def get_team(db: Session = Depends(get_db)):
     users = db.query(Team).all()
@@ -43,7 +39,11 @@ async def get_student_team(
 ):
     """Get student's team and member data with feedback submission validation"""
     try:
-        user = current_user["user"]
+        # Get user ID from current_user
+        user_id = current_user["user"].id
+        
+        # Query for the user again with the current session
+        user = db.query(User).filter(User.id == user_id).first()
         
         # Check if user is a student
         if current_user["role"] != RoleType.STUDENT:
@@ -53,53 +53,64 @@ async def get_student_team(
             )
 
         # Check if user has been assigned to a team
-        if not user.teams:
-            raise HTTPException(
-                status_code=404,
-                detail="You have not been assigned to a team"
-            )
+        if user.teams:
             
-        team = user.teams[0]  # Get the student's team
+            team = user.teams[0]  # Get the student's team
+            # Get all team members including the current user
+            team_members = [
+                {
+                    "id": member.id,
+                    "name": member.name,
+                    "email": member.email,
+                    "is_current_user": member.id == user.id
+                }
+                for member in team.members
+            ]
 
-        # Get all team members including the current user
-        team_members = [
-            {
-                "id": member.id,
-                "name": member.name,
-                "email": member.email,
-                "is_current_user": member.id == user.id
+            skills = team.skills
+            skill_data = []
+            for skill in skills:
+                skill_data.append({
+                    "id": skill.id,
+                    "name": skill.name,
+                    "bgColor": skill.bgColor,
+                    "color": skill.color,
+                    "icon": skill.icon
+                })
+            all_skills = db.query(Skill).all()
+            all_skills_data = []
+            for skill in all_skills:
+                all_skills_data.append({
+                    "id": skill.id,
+                    "name": skill.name,
+                    "bgColor": skill.bgColor,
+                    "color": skill.color,
+                    "icon": skill.icon
+                })
+            return {
+                "has_team": True,
+                "team_id": team.id,
+                "team_name": team.name,
+                "members": team_members,
+                "skills": skill_data,
+                "all_skills":  all_skills
             }
-            for member in team.members
-        ]
+        else:
+            invites = user.invites
+            # invites = db.query(TeamInvites).filter(TeamInvites.user_id == user.id).all()
+            invite_data = []
+            for team in invites:
+                data = {}
+                data["team_id"] = team.id
+                data["team_name"] = team.name
+                data["team_members"] = [member.name for member in team.members]
+                invite_data.append(data)
 
-        skills = team.skills
-        skill_data = []
-        for skill in skills:
-            skill_data.append({
-                "id": skill.id,
-                "name": skill.name,
-                "bgColor": skill.bgColor,
-                "color": skill.color,
-                "icon": skill.icon
-            })
-        all_skills = db.query(Skill).all()
-        all_skills_data = []
-        for skill in all_skills:
-            all_skills_data.append({
-                "id": skill.id,
-                "name": skill.name,
-                "bgColor": skill.bgColor,
-                "color": skill.color,
-                "icon": skill.icon
-            })
-        return {
-            "team_id": team.id,
-            "team_name": team.name,
-            "members": team_members,
-            "skills": skill_data,
-            "all_skills":  all_skills
-        }
-        
+            return {
+                "has_team": False,
+                "invites": invite_data
+            }
+
     except HTTPException as he:
         raise he
     except Exception as e:
@@ -116,7 +127,11 @@ def update_team_skills(
     """
     try:
     # if 1:
-        user = current_user["user"]
+        # Get user ID from current_user
+        user_id = current_user["user"].id
+        
+        # Query for the user again with the current session
+        user = db.query(User).filter(User.id == user_id).first()
         if current_user["role"] != RoleType.STUDENT:
             raise HTTPException(status_code=403, detail="Only students can access this endpoint")
         
@@ -155,6 +170,7 @@ def setFormedTeams(db: Session = Depends(get_db)):
 
     return return_data
 
+# this endpoint is also not used in the frontend
 @router.get("/teams/betaTestPairs")
 def setbetaTestPairs(db: Session = Depends(get_db)):
     teams = db.query(Team).all()
@@ -178,7 +194,11 @@ async def update_team_name(
     db: Session = Depends(get_db)
 ):
     # Extract user and role
-    user = current_user["user"]
+    # Get user ID from current_user
+    user_id = current_user["user"].id
+    
+    # Query for the user again with the current session
+    user = db.query(User).filter(User.id == user_id).first()
     role = current_user["role"]
     
     # Verify that the user is a student
@@ -218,7 +238,7 @@ async def update_team_name(
 
 
 
-@router.get("api/teams/{team_id}/skills")
+@router.get("/api/teams/{team_id}/skills")
 async def get_team_skills(team_id: int, db: Session = Depends(get_db)):
     """Get all skills for a specific team"""
     team = db.query(Team).filter(Team.id == team_id).first()
@@ -238,6 +258,7 @@ async def get_team_skills(team_id: int, db: Session = Depends(get_db)):
     
     return JSONResponse(status_code=200, content=results)
 
+# not used in the frontend
 @router.post("/api/teams/assign-skills")
 async def assign_skills_to_team(request: AssignTeamSkillsRequest, db: Session = Depends(get_db), token: str = Depends(prof_or_ta_required)):
     """Assign skills to a team"""
