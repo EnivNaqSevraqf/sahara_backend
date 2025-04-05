@@ -11,7 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 import os
 
 router = APIRouter(
-    prefix="/api/assignments",
+    prefix="",
     tags=["API Assignments"]
 )
 
