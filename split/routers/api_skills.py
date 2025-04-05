@@ -31,6 +31,7 @@ async def get_all_skills(db: Session = Depends(get_db)):
         })
     return JSONResponse(status_code=200, content=results)
 
+# This endpoint is not used currently.
 @router.post("/create")
 async def create_skill(skill: SkillCreate, db: Session = Depends(get_db), token: str = Depends(prof_or_ta_required)):
     """Create a new skill"""
@@ -65,6 +66,7 @@ async def create_skill(skill: SkillCreate, db: Session = Depends(get_db), token:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Error creating skill: {str(e)}")
 
+# This endpoint is not used currently.
 @router.delete("/{skill_id}")
 async def delete_skill(skill_id: int, db: Session = Depends(get_db), token: str = Depends(prof_required)):
     """Delete a skill (professors only)"""
@@ -92,7 +94,7 @@ async def delete_skill(skill_id: int, db: Session = Depends(get_db), token: str 
         raise HTTPException(status_code=500, detail=f"Error deleting skill: {str(e)}")
     
 
-
+# Not used.
 @router2.post("/create-skill")
 def create_skill( skill_req: SkillRequest):
     return {"bgColor" : skill_req.bgColor}
