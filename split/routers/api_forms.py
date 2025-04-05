@@ -51,7 +51,7 @@ async def api_check_deadline(form_id: int, db: Session = Depends(get_db)):
         }
     )
 
-@router.post("/get_forms")
+@router.post("/api/get_forms")
 async def api_get_forms(user: UserIdRequest, db: Session = Depends(get_db)):
     """Get all forms with info about whether the user has submitted a response"""
     forms = get_all_forms_db(user.user_id, db)
