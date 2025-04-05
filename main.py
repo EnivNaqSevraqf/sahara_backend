@@ -3935,9 +3935,14 @@ async def get_discussions_page(
         db.refresh(global_channel)
     
     channels.append(global_channel)
+
+    # For professors: add only ta-team channels
+    if user.role.role == RoleType.PROF:
+        ta_team_channels = db.query(Channel).filter(Channel.type == 'ta-team').all()
+        channels.extend(ta_team_channels)
     
     # For students: add their team channel and team-TA channel if they exist
-    if user.role.role == RoleType.STUDENT and user.teams:
+    elif user.role.role == RoleType.STUDENT and user.teams:
         team = user.teams[0]  # Get the student's team
         
         # Get or create team channel
@@ -3977,7 +3982,7 @@ async def get_discussions_page(
             channels.append(ta_channel)
     
     # For TAs and Profs: add all their team-TA channels
-    elif user.role.role in [RoleType.TA, RoleType.PROF]:
+    elif user.role.role == RoleType.TA:
         # Get all teams this TA/Prof is assigned to
         team_tas = db.query(Team_TA).filter(Team_TA.ta_id == user.id).all()
         for team_ta in team_tas:
@@ -4032,18 +4037,14 @@ def validate_channel_access(user: User, channel_id: int, db: Session) -> bool:
         
     # For team channels:
     if channel.type == 'team':
-        # # If user is a professor, allow access
-        # if user.role.role == RoleType.PROF:
-        #     return True
-        # For students and TAs, check if they're in the team
-        #return any(team.id == channel.team_id for team in user.teams)
+        # Only students can access team channels
         return user.team_id == channel.team_id
         
     # For TA-team channels:
     if channel.type == 'ta-team':
-        # # If user is a professor, allow access
-        # if user.role.role == RoleType.PROF:
-        #     return True
+        # Professors can access all TA-team channels
+        if user.role.role == RoleType.PROF:
+            return True
         # If user is a TA, check if they're assigned to the team
         if user.role.role == RoleType.TA:
             ta_assignment = db.query(Team_TA).filter(
@@ -4236,80 +4237,81 @@ from sqlalchemy.orm import Session
 async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Invalid file format. Please upload a CSV file.")
-        # Read the CSV file and extract data
+
     try:
-        contents = await file.read()
-        text_contents = contents.decode('utf-8')
-        df = pd.read_csv(StringIO(text_contents))
-        
-        # Validate required columns
-        required_columns = ['RollNo', 'TeamID']
-        for column in required_columns:
-            if column not in df.columns:
-                raise HTTPException(status_code=400, detail=f"Missing required column: {column}")
-        
-        # Group students by team ID
-        team_to_users = {}
+        # Save the uploaded file to a temporary location
+        temp_file_path = f"temp_{file.filename}"
+        with open(temp_file_path, "wb") as temp_file:
+            temp_file.write(file.file.read())
+
+        # Read the CSV file using pandas
+        df = pd.read_csv(temp_file_path)
+
+        # Validate the CSV format
+        required_columns = ['team_name', 'member1', 'member2', 'member3', 'member4', 'member5', 'member6', 'member7', 'member8', 'member9', 'member10']
+        print(df.columns)
+        for _column_name in required_columns:
+            if _column_name not in df.columns:
+                raise HTTPException(status_code=400, detail=f"Invalid CSV format. Missing column: {_column_name}")
+
+        # Check if all members exist in the Users database and perform other checks
+        team_names = set()
+        members_set = list()
         for _, row in df.iterrows():
-            roll_no = row['RollNo']
-            team_id = row['TeamID']
+            team_name = row['team_name']
+            members = []
+            for i in range(1, 11):
+                member = row[f'member{i}']
+                if pd.notna(member) and member.strip():  # Add check for empty strings
+                    members.append(member)
+
+            if team_name in team_names:
+                raise HTTPException(status_code=400, detail=f"Invalid file: Duplicate team name '{team_name}' found.")
             
-            # Skip rows with empty team IDs
-            if pd.isna(team_id) or pd.isna(roll_no):
-                continue
-            
-            team_id = int(team_id)
-            if team_id not in team_to_users:
-                team_to_users[team_id] = []
-            
-            # Find the user with this roll number
-            user = db.query(User).filter(User.id == roll_no).first()
-            if not user:
-                raise HTTPException(status_code=400, detail=f"User with Roll No {roll_no} not found")
-            
-            team_to_users[team_id].append(user)
+            team_names.add(team_name)
+
+            for member_name in members:
+                user = db.query(User).filter_by(username=member_name).first()
+                if not user:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' does not exist in the database.")
+                if user.team_id:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is already assigned to a team.")
+                if member_name in members_set:
+                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is assigned to multiple teams.")
+            members_set.append(members)
+
+        team_names = list(team_names)
+        print("Team names: ", team_names)
+        print("Members set:", members_set)
         
-        # Create or update teams
-        created_teams = []
-        updated_teams = []
-        for team_id, users in team_to_users.items():
-            print("Handling team id:", team_id)
-            # Check if team already exists
-            team = db.query(Team).filter(Team.id == team_id).first()
+        for i in range(len(team_names)):
+            team_name = team_names[i]
+            members = members_set[i]
+            # print(members)
+            # Create and save the team first
+            team = Team(name=team_name)
+            db.add(team)
+            db.commit()  # Commit to get the team ID
+            db.refresh(team)  # Make sure we have the latest data including the ID
             
-            if team:
-                # Update existing team
-                for user in users:
-                    if user not in team.members:
-                        team.members.append(user)
-                        user.team_id = team.id
-                updated_teams.append(team_id)
-            else:
-                # Create new team
-                team = Team(id=team_id, name=f"Team {team_id}")
-                db.add(team)
-                db.flush()  # Get the ID without committing
-                
-                for user in users:
+            # Now add users to the team with the valid team ID
+            for member in members:
+                user = db.query(User).filter_by(username=member).first()
+                print("Over here")
+                if user:
                     team.members.append(user)
-                    user.team_id = team.id
-                created_teams.append(team_id)
-        
-        db.commit()
-        
-        return {
-            "message": "Teams created and updated successfully",
-            "created_teams": created_teams,
-            "updated_teams": updated_teams,
-            "total_teams": len(team_to_users),
-            "total_students_assigned": sum(len(users) for users in team_to_users.values())
-        }
-    except HTTPException as e:
-        db.rollback()
-        raise e
+                    user.team_id = team.id  # Now team.id is valid
+            
+            db.commit()  # Commit changes for this team's users
+
+        # Clean up the temporary file
+        os.remove(temp_file_path)
+
+        return {"detail": "File uploaded and data saved successfully!"}
     except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
+        db.rollback()  # In case of error, rollback
+        raise HTTPException(status_code=500, detail=str(e))
+    
 
 
     # outdated code
@@ -5236,16 +5238,23 @@ async def get_assignables(
 ):
     """Get all assignables categorized by status"""
     try:
+        print("started fetching data")
+        print(datetime.now(timezone.utc))
         # Get all submittables
-        assignables = db.query(Assignable).all()
-        
+        assignables = db.query(Assignable).all() 
+        print(datetime.now(timezone.utc))
+        assignables = db.query(Assignable).all() 
+        print(datetime.now(timezone.utc))
         # Get user's team submissions
         user = current_user["user"]
+        print(datetime.now(timezone.utc))
         user_assignments = {}
+        print(datetime.now(timezone.utc))
         if user.id:
             assignments = db.query(Assignment).filter(Assignment.user_id == user.id).all()
             user_assignments = {s.assignable_id: s for s in assignments}
-        
+        print(datetime.now(timezone.utc))
+        print("fetched data")
         # Helper function to format submittable
         def format_assignable(s):
             assignment = user_assignments.get(s.id)
@@ -5763,7 +5772,7 @@ async def update_team_tas(
             detail=f"Error updating TA assignments: {str(e)}"
         )
 
-@app.get("/users/me")
+@app.get("/api/users/me")
 async def get_user_data(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
