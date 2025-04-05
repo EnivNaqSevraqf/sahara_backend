@@ -10,7 +10,7 @@ class Announcement(Base):
     __tablename__ = "announcements"
     id = Column(Integer, primary_key=True)
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-    created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+    created_at = Column(String, default=lambda: datetime.now(timezone.utc).isoformat())
     title = Column(String, nullable=False)
     content = Column(String, nullable=False)  # Supports Markdown formatting for rich text
     url_name = Column(String, unique=True, nullable=True) 
