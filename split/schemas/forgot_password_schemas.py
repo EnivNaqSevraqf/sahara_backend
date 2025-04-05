@@ -1,3 +1,5 @@
+from pydantic import BaseModel, EmailStr
+
 class RequestOTPModel(BaseModel):
     email: EmailStr
 
