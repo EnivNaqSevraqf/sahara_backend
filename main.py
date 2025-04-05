@@ -5236,16 +5236,23 @@ async def get_assignables(
 ):
     """Get all assignables categorized by status"""
     try:
+        print("started fetching data")
+        print(datetime.now(timezone.utc))
         # Get all submittables
-        assignables = db.query(Assignable).all()
-        
+        assignables = db.query(Assignable).all() 
+        print(datetime.now(timezone.utc))
+        assignables = db.query(Assignable).all() 
+        print(datetime.now(timezone.utc))
         # Get user's team submissions
         user = current_user["user"]
+        print(datetime.now(timezone.utc))
         user_assignments = {}
+        print(datetime.now(timezone.utc))
         if user.id:
             assignments = db.query(Assignment).filter(Assignment.user_id == user.id).all()
             user_assignments = {s.assignable_id: s for s in assignments}
-        
+        print(datetime.now(timezone.utc))
+        print("fetched data")
         # Helper function to format submittable
         def format_assignable(s):
             assignment = user_assignments.get(s.id)
@@ -5763,7 +5770,7 @@ async def update_team_tas(
             detail=f"Error updating TA assignments: {str(e)}"
         )
 
-@app.get("/users/me")
+@app.get("/api/users/me")
 async def get_user_data(
     token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db)
