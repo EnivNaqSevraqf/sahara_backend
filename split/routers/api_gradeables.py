@@ -216,6 +216,6 @@ async def create_gradeable(
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Error creating gradeable: {str(e)}"
+            detail="Internal server error"
         )
 
