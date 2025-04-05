@@ -248,13 +248,12 @@ def delete_calendar_event(
         db.delete(event)
         db.commit()
         return JSONResponse(status_code=200, content={"message": "Event deleted"})
-
     elif event_id[0] == "p":
         # Check if event exists
+        event_id = int(event_id[1:])
         event = db.query(NewUserCalendarEvent).filter_by(id=event_id).first()
         if not event:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
-        
         # Check if the user is the creator of the event
         if event.user_id != user.id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete this event")
@@ -265,6 +264,7 @@ def delete_calendar_event(
         return JSONResponse(status_code=200, content={"message": "Event deleted"})
 
     elif event_id[0] == "t":
+        event_id = int(event_id[1:])
         # Check if the user is in a team
         if not user.team_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete team events")
