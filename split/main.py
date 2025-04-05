@@ -26,8 +26,11 @@ from .models.gradeables import Gradeable
 from .models.skills import Skill
 from .models.gradeable_scores import GradeableScores
 from .models.global_calendar_event import GlobalCalendarEvent
+from .models.global_calendar_event import NewGlobalCalendarEvent
+from .models.user_calendar_event import NewUserCalendarEvent
 from .models.user_calendar_event import UserCalendarEvent
 from .models.team_calendar_event import TeamCalendarEvent
+from .models.team_calendar_event import NewTeamCalendarEvent
 from .models.team_ta import Team_TA
 
 from .schemas.auth_schemas import (

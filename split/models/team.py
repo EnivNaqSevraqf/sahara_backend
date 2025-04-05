@@ -14,4 +14,5 @@ class Team(Base):
     # 
     feedback_submissions = relationship("FeedbackSubmission", back_populates="team")
     invites = relationship("User", secondary=invites, back_populates="invites")
-    # 
+    team_calendar_events = relationship("NewTeamCalendarEvent", back_populates="team", lazy="joined")
+    #
