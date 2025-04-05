@@ -8,6 +8,7 @@ import os
 import uuid
 from datetime import datetime
 
+# this whole file is not used currently.
 router = APIRouter(
     prefix="/api/files",
     tags=["API Files"]

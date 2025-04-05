@@ -15,7 +15,7 @@ import shutil
 
 
 router = APIRouter(
-    
+    prefix="",
     tags=["Submittables"]
 )
 

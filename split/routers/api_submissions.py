@@ -15,7 +15,7 @@ from ..models.roles import RoleType
 from ..models.submittable import Submittable
 
 router = APIRouter(
-    prefix="/api/submissions",
+    prefix="",
     tags=["API Submissions"]
 )
 
