@@ -6,13 +6,14 @@ from ..models.user import User
 from ..models.skills import Skill, TeamSkill, UserSkill, team_skills
 from ..utils.team_matching import get_allocation
 from ..models.team_ta import Team_TA
+from ..dependencies.auth import prof_required
 router = APIRouter(
     prefix="/match",
     tags=["Match"]
 )
 
-@router.get("/match/{n}", response_model=dict)
-async def create_match(n: int, db: Session = Depends(get_db)):
+@router.get("/{n}", response_model=dict)
+async def create_match(n: int, db: Session = Depends(get_db), token: str = Depends(prof_required)):
     if n <= 0:
         raise HTTPException(status_code=400, detail="Number of TAs per team must be positive")
     
@@ -38,9 +39,9 @@ async def create_match(n: int, db: Session = Depends(get_db)):
     
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-@router.get("/match", response_model=dict)
+@router.get("/", response_model=dict)
 async def get_match(db: Session = Depends(get_db)):
     try:
         # Get all teams with their skills and TAs
@@ -84,5 +85,5 @@ async def get_match(db: Session = Depends(get_db)):
         return {"teams": results}
     
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
     

@@ -17,9 +17,88 @@ from typing import Optional
 import shutil
 
 router = APIRouter(
-    
+    prefix="",
     tags=["Assignables"]
 )
+
+# this is to submit file for an assignable, done by students
+@router.post("/assignables/{assignable_id}/submit")
+async def submit_file(
+    assignable_id: int,
+    file: UploadFile = File(...),  # Now accepts a single file
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Submit a file for an assignable.
+    Only one assignment per submittable per user is allowed.
+    """
+    # Get the submittable
+    assignable = db.query(Assignable).filter(Assignable.id == assignable_id).first()
+    if not assignable:
+        raise HTTPException(status_code=404, detail="Assignable not found")
+
+    # Check if user already has a submission
+    user = db.query(User).filter(User.id == current_user["user"].id).first()
+    existing_assignment = db.query(Assignment).filter(
+        Assignment.user_id == user.id,
+        Assignment.assignable_id == assignable_id
+    ).first()
+
+    if existing_assignment:
+        raise HTTPException(
+            status_code=400, 
+            detail="Your team has already submitted a file for this submittable. Please delete the existing submission first."
+        )
+
+    # Check if submission is allowed based on opens_at and deadline
+    now = datetime.now(timezone.utc)
+    opens_at = datetime.fromisoformat(assignable.opens_at) if assignable.opens_at else None
+    deadline = datetime.fromisoformat(assignable.deadline)
+
+    if opens_at and now < opens_at:
+        raise HTTPException(status_code=400, detail="Submission period has not started yet")
+    if now > deadline:
+        raise HTTPException(status_code=400, detail="Submission deadline has passed")
+
+    # Generate a unique filename
+    file_extension = os.path.splitext(file.filename)[1]
+    unique_filename = f"assignment_{uuid.uuid4()}{file_extension}"
+    file_path = os.path.join("uploads", unique_filename)
+
+    # Save the file
+    try:
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
+
+    # Create submission record
+    assignment = Assignment(
+        user_id=user.id,
+        file_url=file_path,
+        original_filename=file.filename,
+        assignable_id=assignable_id,
+        score=None  # Initialize score as None since it hasn't been graded yet
+    )
+
+    try:
+        db.add(assignment)
+        db.commit()
+        db.refresh(assignment)
+        return {
+            "message": "File submitted successfully",
+            "assignment_id": assignment.id,
+            "original_filename": assignment.original_filename,
+            "max_score": assignable.max_score,  # Include max_score in response
+            "score": assignment.score  # Include current score (will be None for new submissions)
+        }
+    except Exception as e:
+        # If database operation fails, delete the uploaded file
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=500, detail=f"Failed to create assignment record: {str(e)}")
 
 @router.post("/assignables/{assignable_id}/submit")
 async def submit_file(
@@ -354,6 +433,7 @@ async def get_assignable_assignments(
         if current_user["role"] == RoleType.STUDENT:
             raise HTTPException(status_code=403, detail="Only professors or TA can view all assignments")
         
+        # Get the assignable
         assignable = db.query(Assignable).filter(Assignable.id == assignable_id).first()
         if not assignable:
             raise HTTPException(status_code=404, detail="Assignable not found")
@@ -364,14 +444,19 @@ async def get_assignable_assignments(
         for assignment in assignments:
             assignment_data = {
                 "id": assignment.id,
-                "team_id": assignment.user_id,
+                "user_id": assignment.user_id,
                 "submitted_on": assignment.submitted_on,
                 "score": assignment.score,
                 "max_score": assignable.max_score,
                 "file": {
                     "file_url": assignment.file_url,
                     "original_filename": assignment.original_filename
-                }
+                },
+                "user": {
+                    "id": assignment.user.id,
+                    "name": assignment.user.name,
+                    "email": assignment.user.email
+                } if assignment.user else None
             }
             result.append(assignment_data)
         

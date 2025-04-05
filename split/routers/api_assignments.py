@@ -11,12 +11,13 @@ from fastapi.responses import FileResponse, JSONResponse
 import os
 
 router = APIRouter(
-    prefix="/api/assignments",
+    prefix="",
     tags=["API Assignments"]
 )
 
 
 
+# this is to update a assignable, done by profs
 
 @router.get("/assignments/{assignment_id}/download")
 async def download_assignment(
@@ -61,6 +62,7 @@ async def download_assignment(
         raise HTTPException(status_code=500, detail=f"Error downloading submission: {str(e)}")
     
 
+# this is to delete a assignment, done by profs or the student who submitted        
 
 @router.delete("/assignments/{assignment_id}")
 async def delete_assignment(

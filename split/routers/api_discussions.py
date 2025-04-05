@@ -216,7 +216,7 @@ async def send_message(
 
         return message_data
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 @router.websocket("/discussions/ws/{channel_id}/{token}")
 async def websocket_endpoint(
@@ -292,6 +292,6 @@ async def download_file(
     except HTTPException as he:
         raise he
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 from sqlalchemy.orm import Session

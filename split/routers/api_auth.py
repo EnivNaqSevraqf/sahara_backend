@@ -95,7 +95,8 @@ def reset_password(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
         )
-
+#no corresponding frontend yet
+# @router.post("/create-prof")
 @router.post("/create-prof")
 def create_prof(
     request: CreateProfRequest,
@@ -195,7 +196,7 @@ async def upload_students(
 
                 # Check if username already exists
                 existing_user = db.query(User).filter(User.username == username).first()
-                if existing_user:
+                if (existing_user):
                     errors.append(f"Username {username} already exists")
                     print(f"Error: Username {username} already exists")
                     continue
@@ -348,7 +349,8 @@ async def upload_tas(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing CSV file: {str(e)}"
         )
-
+#no corresponding frontend yet
+# @router.post("/register-temp")
 @router.post("/register-temp")
 def register_temp(
     request: TempRegisterRequest,
