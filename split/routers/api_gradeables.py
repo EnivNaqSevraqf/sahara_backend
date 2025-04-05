@@ -9,7 +9,7 @@ from ..crud.gradeables import parse_scores_from_csv
 from fastapi.responses import JSONResponse
 
 router = APIRouter(
-    prefix="/api/gradeables",
+    prefix="",
     tags=["API Gradeables"]
 )
 
