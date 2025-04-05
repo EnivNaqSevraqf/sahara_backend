@@ -3935,9 +3935,14 @@ async def get_discussions_page(
         db.refresh(global_channel)
     
     channels.append(global_channel)
+
+    # For professors: add only ta-team channels
+    if user.role.role == RoleType.PROF:
+        ta_team_channels = db.query(Channel).filter(Channel.type == 'ta-team').all()
+        channels.extend(ta_team_channels)
     
     # For students: add their team channel and team-TA channel if they exist
-    if user.role.role == RoleType.STUDENT and user.teams:
+    elif user.role.role == RoleType.STUDENT and user.teams:
         team = user.teams[0]  # Get the student's team
         
         # Get or create team channel
@@ -3977,7 +3982,7 @@ async def get_discussions_page(
             channels.append(ta_channel)
     
     # For TAs and Profs: add all their team-TA channels
-    elif user.role.role in [RoleType.TA, RoleType.PROF]:
+    elif user.role.role == RoleType.TA:
         # Get all teams this TA/Prof is assigned to
         team_tas = db.query(Team_TA).filter(Team_TA.ta_id == user.id).all()
         for team_ta in team_tas:
@@ -4032,18 +4037,14 @@ def validate_channel_access(user: User, channel_id: int, db: Session) -> bool:
         
     # For team channels:
     if channel.type == 'team':
-        # # If user is a professor, allow access
-        # if user.role.role == RoleType.PROF:
-        #     return True
-        # For students and TAs, check if they're in the team
-        #return any(team.id == channel.team_id for team in user.teams)
+        # Only students can access team channels
         return user.team_id == channel.team_id
         
     # For TA-team channels:
     if channel.type == 'ta-team':
-        # # If user is a professor, allow access
-        # if user.role.role == RoleType.PROF:
-        #     return True
+        # Professors can access all TA-team channels
+        if user.role.role == RoleType.PROF:
+            return True
         # If user is a TA, check if they're assigned to the team
         if user.role.role == RoleType.TA:
             ta_assignment = db.query(Team_TA).filter(
