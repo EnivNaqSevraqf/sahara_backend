@@ -25,3 +25,14 @@ class TeamCalendarEvent(Base):
             if user and user.role.role == RoleType.STUDENT:
                 raise ValueError("Students cannot create calendar events.")
         return value
+
+class NewTeamCalendarEvent(Base):
+    __tablename__ = "team_calendar"
+    id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)
+    subtitle = Column(String, nullable=True)
+    start = Column(String, nullable=False)
+    end = Column(String, nullable=False)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+
+    team = relationship("Team", back_populates="team_calendar_events", lazy="joined")

@@ -31,6 +31,7 @@ class User(Base):
     feedback_submissions = relationship("FeedbackSubmission", foreign_keys="FeedbackSubmission.submitter_id", back_populates="submitter", lazy="joined")
     feedback_details = relationship("FeedbackDetail", foreign_keys="FeedbackDetail.member_id", back_populates="member", lazy="joined")
     invites = relationship("Team", secondary="invites", back_populates="invites")
+    user_calendar_events = relationship("NewUserCalendarEvent", back_populates="user", lazy="joined")
     
     # @validates('skills')
     # def validate_skills(self, key, skill):

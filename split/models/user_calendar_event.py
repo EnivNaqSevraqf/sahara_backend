@@ -25,3 +25,22 @@ class UserCalendarEvent(Base):
             if user and user.role.role == RoleType.STUDENT:
                 raise ValueError("Students cannot create calendar events.")
         return value
+
+class NewUserCalendarEvent(Base):
+    __tablename__ = "user_calendar"
+    id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)
+    subtitle = Column(String, nullable=True)
+    start = Column(String, nullable=False)
+    end = Column(String, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    user = relationship("User", back_populates="user_calendar_events", lazy="joined")
+
+    # @validates("user_id")
+    # def validate_user(self, key, value):
+    #     with SessionLocal() as session:
+    #         user = session.query(User).filter_by(id=value).first()
+    #         if user and user.role.role != RoleType.STUDENT:
+    #             raise ValueError("Only students can create personal calendar events.")
+    #     return value
