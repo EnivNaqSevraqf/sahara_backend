@@ -119,7 +119,7 @@ class Submittable(Base):
     opens_at = Column(String, nullable=True)  # ISO 8601 format
     deadline = Column(String, nullable=False)  # ISO 8601 format
     description = Column(String, nullable=False)
-    file_url = Column(String, nullable=False)  # URL path to the reference file
+    file_url = Column(String, nullable=True)  # URL path to the reference file
     original_filename = Column(String, nullable=False)
     max_score = Column(Integer, nullable=False)  # Maximum possible score for this submittable
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
@@ -1301,6 +1301,7 @@ async def upload_tas(
     token: str = Depends(prof_required),
     db: Session = Depends(get_db)
 ):
+    """Upload TAs from a CSV file with Name and Email columns"""
     # Ensure the file is a CSV
     if not file.filename.endswith('.csv'):
         raise HTTPException(
@@ -1313,14 +1314,40 @@ async def upload_tas(
         content = await file.read()
         content_str = content.decode('utf-8')
         
-        try:
-            tas = extract_ta_data_from_content(content_str)
-        except CSVFormatError as e:
+        # Print the first few lines for debugging
+        print(f"CSV Content (first 100 chars): {content_str[:100]}")
+        
+        # Parse the CSV directly to get TAs
+        reader = csv.DictReader(content_str.splitlines())
+        required_headers = ['Name', 'Email']
+        
+        # Validate headers
+        headers = reader.fieldnames
+        print(f"CSV Headers: {headers}")
+        
+        if not headers:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"CSV format error: {str(e)}"
+                detail="Empty CSV file or invalid format"
             )
-            
+        
+        for header in required_headers:
+            if header not in headers:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, 
+                    detail=f"CSV format error: Missing header: {header}"
+                )
+        
+        tas = []
+        for row in reader:
+            if row.get('Name') and row.get('Email'):
+                tas.append({
+                    'Name': row['Name'],
+                    'Email': row['Email']
+                })
+        
+        print(f"Parsed {len(tas)} TAs from CSV")
+        
         created_tas = []
         errors = []
         
@@ -1335,7 +1362,9 @@ async def upload_tas(
         # Process each TA
         for ta in tas:
             try:
-                username = ta['Username']
+                # Extract username from email
+                username = ta['Email'].split('@')[0]
+                print(f"Processing TA: {ta['Name']}, username: {username}")
                 
                 # Check if username already exists
                 existing_user = db.query(User).filter(User.username == username).first()
@@ -1356,7 +1385,7 @@ async def upload_tas(
                     role_id=ta_role.id
                 )
                 
-                # Add and commit
+                # Add to database
                 db.add(new_ta)
                 db.commit()
                 db.refresh(new_ta)
@@ -1370,7 +1399,9 @@ async def upload_tas(
                 })
                 
             except Exception as e:
-                errors.append(f"Error processing TA {ta}: {str(e)}")
+                db.rollback()  # Rollback on error
+                print(f"Error processing TA {ta['Name']}: {str(e)}")
+                errors.append(f"Error processing TA {ta['Name']}: {str(e)}")
         
         return {
             "message": f"Processed {len(created_tas)} TAs",
@@ -1378,12 +1409,17 @@ async def upload_tas(
             "errors": errors
         }
     
+    except HTTPException as he:
+        print(f"HTTP Exception: {he.detail}")
+        raise he
     except Exception as e:
+        import traceback
+        print(f"Error in upload_tas: {str(e)}")
+        print(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing CSV file: {str(e)}"
         )
-
 @app.post("/register-temp")
 def register_temp(
     request: TempRegisterRequest,
@@ -1492,7 +1528,7 @@ async def create(
             creator_id=user.id
         )
 
-        print("Here")
+        #print("Here")
 
         # Handle file upload if provided
         if file:
@@ -3493,7 +3529,8 @@ async def create_submittable(
     description: str = FastAPIForm(...),
     max_score: int = FastAPIForm(...),  # Add max_score parameter
     opens_at: Optional[str] = FastAPIForm(None),
-    file: UploadFile = File(...),
+    #file: UploadFile = File(...),
+    file: UploadFile = File(None),
     db: Session = Depends(get_db),
     token: str = Depends(prof_or_ta_required)
 ):
@@ -3526,12 +3563,14 @@ async def create_submittable(
             raise HTTPException(status_code=404, detail="User not found")
 
         # Save the reference file
-        file_extension = file.filename.split('.')[-1]
-        file_name = f"ref_{uuid.uuid4()}.{file_extension}"
-        file_path = f"uploads/{file_name}"
+        file_path = None
+        if file:
+            file_extension = file.filename.split('.')[-1]
+            file_name = f"ref_{uuid.uuid4()}.{file_extension}"
+            file_path = f"uploads/{file_name}"
         
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
 
         # Create submittable in database with file information
         new_submittable = Submittable(
@@ -3541,7 +3580,7 @@ async def create_submittable(
             description=description,
             max_score=max_score,  # Add max_score to submittable creation
             creator_id=user.id,
-            file_url=f"uploads/{file_name}",  # URL path without leading slash
+            file_url=file_path,  # URL path without leading slash
             original_filename=file.filename
         )
         
