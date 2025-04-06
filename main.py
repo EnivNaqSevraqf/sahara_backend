@@ -107,7 +107,7 @@ class Submittable(Base):
     opens_at = Column(String, nullable=True)  # ISO 8601 format
     deadline = Column(String, nullable=False)  # ISO 8601 format
     description = Column(String, nullable=False)
-    file_url = Column(String, nullable=False)  # URL path to the reference file
+    file_url = Column(String, nullable=True)  # URL path to the reference file
     original_filename = Column(String, nullable=False)
     max_score = Column(Integer, nullable=False)  # Maximum possible score for this submittable
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
@@ -1394,7 +1394,7 @@ async def create(
             creator_id=user.id
         )
 
-        print("Here")
+        #print("Here")
 
         # Handle file upload if provided
         if file:
@@ -3161,7 +3161,8 @@ async def create_submittable(
     description: str = FastAPIForm(...),
     max_score: int = FastAPIForm(...),  # Add max_score parameter
     opens_at: Optional[str] = FastAPIForm(None),
-    file: UploadFile = File(...),
+    #file: UploadFile = File(...),
+    file: UploadFile = File(None),
     db: Session = Depends(get_db),
     token: str = Depends(prof_or_ta_required)
 ):
@@ -3194,12 +3195,14 @@ async def create_submittable(
             raise HTTPException(status_code=404, detail="User not found")
 
         # Save the reference file
-        file_extension = file.filename.split('.')[-1]
-        file_name = f"ref_{uuid.uuid4()}.{file_extension}"
-        file_path = f"uploads/{file_name}"
+        file_path = None
+        if file:
+            file_extension = file.filename.split('.')[-1]
+            file_name = f"ref_{uuid.uuid4()}.{file_extension}"
+            file_path = f"uploads/{file_name}"
         
-        with open(file_path, "wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
 
         # Create submittable in database with file information
         new_submittable = Submittable(
@@ -3209,7 +3212,7 @@ async def create_submittable(
             description=description,
             max_score=max_score,  # Add max_score to submittable creation
             creator_id=user.id,
-            file_url=f"uploads/{file_name}",  # URL path without leading slash
+            file_url=file_path,  # URL path without leading slash
             original_filename=file.filename
         )
         
