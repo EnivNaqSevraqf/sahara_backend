@@ -2890,8 +2890,8 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
                 # # Extract and validate username
                 # username = row['username'].strip()
                 # Extract and validate roll no
-                roll_no = row['RollNo'].strip()
-                if not roll_no:
+                RollNo = row['RollNo'].strip()
+                if not RollNo:
                     continue
                 
                 # Extract and validate score
@@ -2905,7 +2905,7 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
                     raise ValueError(f"Invalid score format in row {row_num}")
                 
                 # Get user ID from roll number
-                user = db.query(User).filter(User.id == roll_no).first()
+                user = db.query(User).filter(User.id == RollNo).first()
             
                 if not user:
                     unadded_users.append(user)
