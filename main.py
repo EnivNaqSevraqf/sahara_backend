@@ -3,7 +3,7 @@ import json
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, Form as FastAPIForm, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text, Float 
+from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text, Float, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, validates
 from sqlalchemy.dialects.postgresql import JSONB, insert
@@ -86,7 +86,19 @@ team_skills = Table(
     Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
     Column("skill_id", Integer, ForeignKey("skills.id"), primary_key=True)
 )
-
+# Association table for Team-User many-to-many relationship
+team_members = Table(
+    "team_members", Base.metadata,
+    Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True)
+) 
+# Define the invites association table
+invites = Table(
+    "invites", Base.metadata,
+    Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
+    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+    Column("invited_at", String, default=datetime.now(timezone.utc).isoformat())
+)
 class Skill(Base):
     __tablename__ = "skills"
     id = Column(Integer, primary_key=True)
@@ -177,45 +189,48 @@ class User(Base):
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
     email = Column(String, nullable=False, unique=True)
-    username = Column(String, nullable=False, unique=True)  # Added username field
+    username = Column(String, nullable=False, unique=True)
     role_id = Column(Integer, ForeignKey("roles.id"), nullable=False)
     team_id = Column(Integer, ForeignKey("teams.id"), nullable=True)
     hashed_password = Column(String, nullable=False)
 
     role = relationship("Role", back_populates="users")
     teams = relationship("Team", secondary="team_members", back_populates="members")
-    responses = relationship("FormResponse", back_populates="user")
-    gradeables = relationship("Gradeable", back_populates="creator")
-    calendar_events = relationship("UserCalendarEvent", back_populates="creator")
-    team_calendar_events = relationship("TeamCalendarEvent", back_populates="creator")
-    # global_calendar_events = relationship("GlobalCalendarEvent", back_populates="creator")
+    responses = relationship("FormResponse", back_populates="user", lazy="joined")
+    gradeables = relationship("Gradeable", back_populates="creator", lazy="joined")
+    calendar_events = relationship("UserCalendarEvent", back_populates="creator", lazy="joined")
+    team_calendar_events = relationship("TeamCalendarEvent", back_populates="creator", lazy="joined")
     skills = relationship("Skill", secondary=user_skills, back_populates="users")
-    gradeable_scores = relationship("GradeableScores", back_populates="user")
+    gradeable_scores = relationship("GradeableScores", back_populates="user", lazy="joined")
     submittables = relationship("Submittable", back_populates="creator", lazy="joined")
     assignables = relationship("Assignable", back_populates="creator", lazy="joined")
-    assignments = relationship("Assignment", back_populates="user")
-    messages = relationship("Message", back_populates="sender")
+    assignments = relationship("Assignment", back_populates="user", lazy="joined")
+    messages = relationship("Message", back_populates="sender", lazy="joined")
+    feedback_submissions = relationship("FeedbackSubmission", foreign_keys="FeedbackSubmission.submitter_id", back_populates="submitter", lazy="joined")
+    feedback_details = relationship("FeedbackDetail", foreign_keys="FeedbackDetail.member_id", back_populates="member", lazy="joined")
     invites = relationship("Team", secondary="invites", back_populates="invites")
+    user_calendar_events = relationship("NewUserCalendarEvent", back_populates="user", lazy="joined")
     
-    @validates('skills')
-    def validate_skills(self, key, skill):
-        # Only allow TAs to have skills
-        with SessionLocal() as db:
-            role = db.query(Role).filter_by(id=self.role_id).first()
-            if role and role.role != RoleType.TA:
-                raise ValueError("Only TAs can have skills.")
-        return skill
+    # @validates('skills')
+    # def validate_skills(self, key, skill):
+    #     with SessionLocal() as db:
+    #         role = db.query(Role).filter_by(id=self.role_id).first()
+    #         if role and role.role != RoleType.TA:
+    #             raise ValueError("Only TAs can have skills.")
+    #     return skill
 
 class Team(Base):
     __tablename__ = "teams"
-    __table_args__ = {'extend_existing': True}
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
     
-    members = relationship("User", secondary="team_members", back_populates="teams")
+    members = relationship("User", secondary=team_members, back_populates="teams")
     skills = relationship("Skill", secondary=team_skills, back_populates="teams")
-    submissions = relationship("Submission", back_populates="team")
-    invites = relationship("User", secondary="invites", back_populates="invites")
+    submissions = relationship("Submission", back_populates="team") 
+    # 
+    feedback_submissions = relationship("FeedbackSubmission", back_populates="team")
+    invites = relationship("User", secondary=invites, back_populates="invites")
+    team_calendar_events = relationship("NewTeamCalendarEvent", back_populates="team", lazy="joined")
 
 class Form(Base):
     __tablename__ = "forms"
@@ -240,17 +255,17 @@ class Form(Base):
                     raise ValueError("Forms cannot be assigned to Professors.")
         return value
 
-team_members = Table(
-    "team_members", Base.metadata,
-    Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
-    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True)
-)
-invites = Table(
-    "invites", Base.metadata,
-    Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
-    Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
-    Column("invited_at", String, default=datetime.now(timezone.utc).isoformat())
-)
+# team_members = Table(
+#     "team_members", Base.metadata,
+#     Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
+#     Column("user_id", Integer, ForeignKey("users.id"), primary_key=True)
+# )
+# invites = Table(
+#     "invites", Base.metadata,
+#     Column("team_id", Integer, ForeignKey("teams.id"), primary_key=True),
+#     Column("user_id", Integer, ForeignKey("users.id"), primary_key=True),
+#     Column("invited_at", String, default=datetime.now(timezone.utc).isoformat())
+# )
 
 class Announcement(Base):
     __tablename__ = "announcements"
@@ -318,62 +333,51 @@ class GradeableScores(Base):
 class GlobalCalendarEvent(Base):
     __tablename__ = "global_calendar_events"
     id = Column(Integer, primary_key=True)
-    events = Column(JSONB, nullable=False)
+    events = Column(JSON, nullable=False)
     description = Column(String, nullable=False)
     start_time = Column(String, nullable=False)
     end_time = Column(String, nullable=False)
-    # creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
-
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
-
-    # creator = relationship("User", back_populates="calendar_events")
-
-    # @validates("creator_id")
-    # def validate_creator(self, key, value):
-    #     user = SessionLocal.query(User).filter_by(id=value).first()
-    #     if user and user.role == RoleType.STUDENT:
-    #         raise ValueError("Students cannot create calendar events.")
-    #     return value
 
 class UserCalendarEvent(Base):
     __tablename__ = "user_calendar_events"
     id = Column(Integer, primary_key=True)
-    events = Column(JSONB, nullable=False)
+    events = Column(JSON, nullable=False)
     description = Column(String, nullable=False)
     start_time = Column(String, nullable=False)
     end_time = Column(String, nullable=False)
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
 
-    creator = relationship("User", back_populates="calendar_events")
+    creator = relationship("User", back_populates="calendar_events", lazy="joined")
 
     @validates("creator_id")
     def validate_creator(self, key, value):
         with SessionLocal() as session:
             user = session.query(User).filter_by(id=value).first()
-            if user and user.role == RoleType.STUDENT:
+            if user and user.role.role == RoleType.STUDENT:
                 raise ValueError("Students cannot create calendar events.")
-            return value
+        return value
 
 class TeamCalendarEvent(Base):
     __tablename__ = "team_calendar_events"
     id = Column(Integer, primary_key=True)
-    events = Column(JSONB, nullable=False)
+    events = Column(JSON, nullable=False)
     description = Column(String, nullable=False)
     start_time = Column(String, nullable=False)
     end_time = Column(String, nullable=False)
     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
 
-    creator = relationship("User", back_populates="team_calendar_events")
+    creator = relationship("User", back_populates="team_calendar_events", lazy="joined")
 
     @validates("creator_id")
     def validate_creator(self, key, value):
         with SessionLocal() as session:
             user = session.query(User).filter_by(id=value).first()
-            if user and user.role == RoleType.STUDENT:
+            if user and user.role.role == RoleType.STUDENT:
                 raise ValueError("Students cannot create calendar events.")
-            return value
+        return value
     
 class Team_TA(Base):
     __tablename__ = "team_tas"
@@ -455,7 +459,90 @@ class TeamSkill(Base):
 class UserSkill(Base):
     __tablename__ = "user_skills"
     
+# class TeamCalendarEvent(Base):
+#     __tablename__ = "team_calendar_events"
+#     id = Column(Integer, primary_key=True)
+#     events = Column(JSON, nullable=False)
+#     description = Column(String, nullable=False)
+#     start_time = Column(String, nullable=False)
+#     end_time = Column(String, nullable=False)
+#     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+#     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
 
+#     creator = relationship("User", back_populates="team_calendar_events", lazy="joined")
+
+#     @validates("creator_id")
+#     def validate_creator(self, key, value):
+#         with SessionLocal() as session:
+#             user = session.query(User).filter_by(id=value).first()
+#             if user and user.role.role == RoleType.STUDENT:
+#                 raise ValueError("Students cannot create calendar events.")
+#         return value
+
+class NewTeamCalendarEvent(Base):
+    __tablename__ = "team_calendar"
+    id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)
+    subtitle = Column(String, nullable=True)
+    start = Column(String, nullable=False)
+    end = Column(String, nullable=False)
+    team_id = Column(Integer, ForeignKey("teams.id"), nullable=False)
+
+    team = relationship("Team", back_populates="team_calendar_events", lazy="joined")
+# class UserCalendarEvent(Base):
+#     __tablename__ = "user_calendar_events"
+#     id = Column(Integer, primary_key=True)
+#     events = Column(JSON, nullable=False)
+#     description = Column(String, nullable=False)
+#     start_time = Column(String, nullable=False)
+#     end_time = Column(String, nullable=False)
+#     creator_id = Column(Integer, ForeignKey("users.id"), nullable=False, unique=True)
+#     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+
+#     creator = relationship("User", back_populates="calendar_events", lazy="joined")
+
+#     @validates("creator_id")
+#     def validate_creator(self, key, value):
+#         with SessionLocal() as session:
+#             user = session.query(User).filter_by(id=value).first()
+#             if user and user.role.role == RoleType.STUDENT:
+#                 raise ValueError("Students cannot create calendar events.")
+#         return value
+
+class NewUserCalendarEvent(Base):
+    __tablename__ = "user_calendar"
+    id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)
+    subtitle = Column(String, nullable=True)
+    start = Column(String, nullable=False)
+    end = Column(String, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    user = relationship("User", back_populates="user_calendar_events", lazy="joined")
+
+    # @validates("user_id")
+    # def validate_user(self, key, value):
+    #     with SessionLocal() as session:
+    #         user = session.query(User).filter_by(id=value).first()
+    #         if user and user.role.role != RoleType.STUDENT:
+    #             raise ValueError("Only students can create personal calendar events.")
+    #     return value
+# class GlobalCalendarEvent(Base):
+#     __tablename__ = "global_calendar_events"
+#     id = Column(Integer, primary_key=True)
+#     events = Column(JSON, nullable=False)
+#     description = Column(String, nullable=False)
+#     start_time = Column(String, nullable=False)
+#     end_time = Column(String, nullable=False)
+#     created_at = Column(String, default=datetime.now(timezone.utc).isoformat())
+
+class NewGlobalCalendarEvent(Base):
+    __tablename__ = "global_calendar"
+    id = Column(Integer, primary_key=True)
+    title = Column(String, nullable=False)
+    subtitle = Column(String, nullable=True)
+    start = Column(String, nullable=False)
+    end = Column(String, nullable=False)
 # Add these Pydantic models for request validation
 class FeedbackDetailRequest(BaseModel):
     member_id: int
@@ -706,7 +793,18 @@ class TeamNameUpdateRequest(BaseModel):
         if len(v.strip()) > 100:
             raise ValueError("Team name cannot exceed 100 characters")
         return v.strip()
+class CalendarEvent(BaseModel):
+    start: str
+    end: str
+    title: str
+    subtitle: str
+    type: str
+    # color: str = None
+    # allDay: bool = False
 
+class CalendarUpdateModel(BaseModel):
+    events: List[CalendarEvent]
+    # token: str = Header(None)
 app = FastAPI()
 
 # CORS Middleware
@@ -1761,10 +1859,195 @@ async def get_match(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 # Calendar
-
-class CalendarUpdateModel(BaseModel):
-    events: List[Any]
     # token: str = Header(None)
+
+# @app.post("/calendar/update")
+# def update_calendar(
+#     calendar_update_model: CalendarUpdateModel,
+#     db: Session = Depends(get_db),
+#     # user_id: int = Depends(resolve_token)
+# ):
+#     # user = db.query(User).filter_by(id=user_id).first()
+#     print(calendar_update_model.events)
+#     global_events = calendar_update_model.events
+#     # global_events, personal_events, team_events = split_events(calendar_update_model.events)
+#     print(global_events)
+#     overwrite_global_events(global_events, db)
+#     return {"message": "Calendar updated"}
+#     # if user.role == RoleType.PROF:
+#     #     overwrite_global_events(events, db)
+#     # elif user.role == RoleType.STUDENT:
+#     #     overwrite_personal_events(user, events, db)
+#     # elif user.role == RoleType.TA:
+#     #     overwrite_team_events(user, events, db)
+#     # return {"message": "Calendar updated"}
+#     # if the role is admin
+#     # select all the global events
+
+#     # overwrite_global_events
+
+
+
+    
+#     pass
+
+@app.get("/calendar")
+def get_calendar(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    # user_id: int = Depends(resolve_token)
+):
+    user = current_user["user"]
+    role = current_user["role"]
+
+    events = []
+    # Get the global events
+    global_events_db = db.query(NewGlobalCalendarEvent).all()
+    global_events = []
+    for event in global_events_db:
+        global_events.append({
+            "event_id": f"g{event.id}",
+            "title": event.title,
+            "subtitle": event.subtitle,
+            "start": event.start,
+            "end": event.end,
+            "type": "global"
+        })
+        events += global_events
+    
+    user_events_db = db.query(NewUserCalendarEvent).filter_by(user_id=user.id).all()
+    user_events = []
+    for event in user_events_db:
+        user_events.append({
+            "event_id": f"p{event.id}",
+            "title": event.title,
+            "subtitle": event.subtitle,
+            "start": event.start,
+            "end": event.end,
+            "type": "personal"
+        })
+        events += user_events
+    if user.team_id:
+        team_events_db = db.query(NewTeamCalendarEvent).filter_by(team_id=user.team_id).all()
+        team_events = []
+        for event in team_events_db:
+            team_events.append({
+                "event_id": f"t{event.id}",
+                "title": event.title,
+                "subtitle": event.subtitle,
+                "start": event.start,
+                "end": event.end,
+                "type": "team"
+            })
+        events += team_events
+    
+    
+    
+    return JSONResponse(status_code=201, content=events)
+    # return {"message": "Calendar retrieved", "events": global_events}
+
+@app.post("/calendar/create")
+def create_calendar(
+    calendar_event: CalendarEvent,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    # user_id: int = Depends(resolve_token)
+):
+    
+    user = current_user["user"]
+    role = current_user["role"]
+
+    if calendar_event.type == "global":
+        # Check if the user is professor
+        if role != RoleType.PROF:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to create global events")
+        # Create the global event
+        new_event = NewGlobalCalendarEvent(
+            title=calendar_event.title,
+            subtitle=calendar_event.subtitle,
+            start=calendar_event.start,
+            end=calendar_event.end
+        )
+
+        db.add(new_event)
+        db.commit()
+        db.refresh(new_event)
+
+        event_json = {
+            "event_id": f"g{new_event.id}",
+            "title": new_event.title,
+            "subtitle": new_event.subtitle,
+            "start": new_event.start,
+            "end": new_event.end,
+            "type": "global"
+        }
+
+        return JSONResponse(status_code=201, content={"message": "Global event created", "event": event_json})
+    if calendar_event.type == "personal":
+        new_personal_event = NewUserCalendarEvent(
+            title=calendar_event.title,
+            subtitle=calendar_event.subtitle,
+            start=calendar_event.start,
+            end=calendar_event.end,
+            user_id=user.id
+        )
+        db.add(new_personal_event)
+        db.commit()
+        db.refresh(new_personal_event)
+
+        event_json = {
+            "event_id": f"p{new_personal_event.id}",
+            "title": new_personal_event.title,
+            "subtitle": new_personal_event.subtitle,
+            "start": new_personal_event.start,
+            "end": new_personal_event.end,
+            "type": "personal"
+        }
+
+        return JSONResponse(status_code=201, content={"message": "Personal event created", "event": event_json})
+    if calendar_event.type == "team":
+        # Check if the user is in a team
+        if not user.team_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to create team events")
+        # Create the team event
+        new_team_event = NewTeamCalendarEvent(
+            title=calendar_event.title,
+            subtitle=calendar_event.subtitle,
+            start=calendar_event.start,
+            end=calendar_event.end,
+            team_id=user.team_id
+        )
+        db.add(new_team_event)
+        db.commit()
+        db.refresh(new_team_event)
+
+        event_json = {
+            "event_id": f"t{new_team_event.id}",
+            "title": new_team_event.title,
+            "subtitle": new_team_event.subtitle,
+            "start": new_team_event.start,
+            "end": new_team_event.end,
+            "type": "team"
+        }
+
+        return JSONResponse(status_code=201, content={"message": "Team event created", "event": event_json})
+
+        # Check if the user is a student or TA
+        # if role not in [RoleType.STUDENT, RoleType.TA]:
+            # raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to create personal events")
+        # Create the personal event
+        # new_event = NewGlobalCalendarEvent(
+        #     title=calendar_event.title,
+        #     subtitle=calendar_event.subtitle,
+        #     start=calendar_event.start,
+        #     end=calendar_event.end
+        # )
+
+        # db.add(new_event)
+        # db.commit()
+        # db.refresh(new_event)
+
+        # return JSONResponse(status_code=201, content={"message": "Personal event created", "event": new_event})
 
 @app.post("/calendar/update")
 def update_calendar(
@@ -1790,24 +2073,73 @@ def update_calendar(
     # select all the global events
 
     # overwrite_global_events
-
-
-
     
     pass
-
-@app.get("/calendar/")
-def get_calendar(
+@app.delete("/calendar/delete/{event_id}")
+def delete_calendar_event(
+    event_id: str,
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
     # user_id: int = Depends(resolve_token)
 ):
-    # Get the global events
-    global_events = get_global_events(db)
-    print(global_events)
-    return JSONResponse(status_code=201, content=global_events)
-    # return {"message": "Calendar retrieved", "events": global_events}
+    user = current_user["user"]
+    role = current_user["role"]
+    if event_id[0] == "g":
+        # Check if the user is professor
+        if role != RoleType.PROF:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete global events")
+        event_id = int(event_id[1:])
+        # Check if the event exists
+        event = db.query(NewGlobalCalendarEvent).filter_by(id=event_id).first()
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+        
+        # Delete the event
+        db.delete(event)
+        db.commit()
+        return JSONResponse(status_code=200, content={"message": "Event deleted"})
+    elif event_id[0] == "p":
+        # Check if event exists
+        event_id = int(event_id[1:])
+        event = db.query(NewUserCalendarEvent).filter_by(id=event_id).first()
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+        # Check if the user is the creator of the event
+        if event.user_id != user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete this event")
+        
+        # Delete the event
+        db.delete(event)
+        db.commit()
+        return JSONResponse(status_code=200, content={"message": "Event deleted"})
+
+    elif event_id[0] == "t":
+        event_id = int(event_id[1:])
+        # Check if the user is in a team
+        if not user.team_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete team events")
+        # Check if event exists
+        event = db.query(NewTeamCalendarEvent).filter_by(id=event_id).first()
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+        
+        # Check if the user is the creator of the event
+        if event.team_id != user.team_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete this event")
 
 
+
+
+        event = db.query(NewTeamCalendarEvent).filter_by(id=event_id).first()
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+        
+
+        db.delete(event)
+        db.commit()
+        return JSONResponse(status_code=200, content={"message": "Event deleted"})
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid event ID")
 
 @app.get("/people/")
 def get_people(db: Session = Depends(get_db)):
