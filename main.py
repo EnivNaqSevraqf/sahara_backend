@@ -679,6 +679,44 @@ def overwrite_team_events(user: User, events, db: Session):
     db.commit()
     db.refresh(row)
 
+def reset_sequence(table_name: str, db: Session):
+    """Reset the ID sequence for a table to start from MAX(id) + 1"""
+    try:
+        # First check if the table exists and has an id column
+        check_id_query = text(f"""
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name = '{table_name}' AND column_name = 'id'
+            );
+        """)
+        has_id = db.execute(check_id_query).scalar()
+        
+        if not has_id:
+            print(f"  - Skipping {table_name} - no 'id' column found")
+            return
+            
+        # Check if sequence exists for this table
+        sequence_query = text(f"""
+            SELECT pg_get_serial_sequence('{table_name}', 'id') AS seq_name;
+        """)
+        sequence_name = db.execute(sequence_query).scalar()
+        
+        if not sequence_name:
+            print(f"  - Skipping {table_name} - no sequence found")
+            return
+            
+        # Reset the sequence
+        reset_query = text(f"""
+            SELECT setval('{sequence_name}', 
+                        (SELECT COALESCE(MAX(id), 0) + 1 FROM {table_name}), 
+                        false);
+        """)
+        db.execute(reset_query)
+        db.commit()
+        print(f"  ✓ Reset sequence for {table_name}")
+    except Exception as e:
+        db.rollback()
+        print(f"  ✗ Error resetting sequence for {table_name}: {str(e)}")
 
 class QueryBaseModel(BaseModel):
     token: str = Header(None)
@@ -820,6 +858,19 @@ print("Creating tables...")
 Base.metadata.create_all(bind=engine)
 print("Tables created!")
 
+# Reset sequences for all tables
+print("Resetting sequences...")
+with engine.connect() as connection:
+    # Get all table names from SQLAlchemy metadata
+    table_names = Base.metadata.tables.keys()
+    
+    # Process each table in a separate transaction
+    for table_name in table_names:
+        # Create a new session for each table to isolate transactions
+        with SessionLocal() as db:
+            reset_sequence(table_name, db)
+            
+print("Sequences reset!")
 
 # Add missing columns to submittables table if they don't exist
 with engine.connect() as connection:
@@ -866,25 +917,56 @@ def create_default_roles():
                 db.add(new_role)
         db.commit()
 
-# Create default admin/prof user
-def create_default_admin():
+# Create default professor (Indranil Saha)
+def create_default_prof():
     with SessionLocal() as db:
         prof_role = db.query(Role).filter(Role.role == RoleType.PROF).first()
         if not prof_role:
             return  # Can't create user without role
         
-        existing_admin = db.query(User).filter(User.username == "root123").first()
-        if not existing_admin:
-            new_admin = User(
-                name="Root Admin",
-                email="root@example.com",
-                username="root123",
-                hashed_password=pwd_context.hash("root123"),
+        # Check if the professor already exists
+        existing_prof = db.query(User).filter(User.email == "isaha@iitk.ac.in").first()
+        if not existing_prof:
+            # Create username from email
+            username = "isaha"
+            
+            # Create the professor
+            new_prof = User(
+                name="Indranil Saha",
+                email="isaha@iitk.ac.in",
+                username=username,
+                hashed_password=pwd_context.hash("password123"),  # Set a default password
                 role_id=prof_role.id
             )
-            db.add(new_admin)
+            db.add(new_prof)
             db.commit()
 
+# Create default skills
+def create_default_skills():
+    with SessionLocal() as db:
+        # Define the default skills with their properties
+        default_skills = [
+            {"name": "Java", "bgColor": "#f89820", "color": "#ffffff", "icon": "code"},
+            {"name": "MongoDB", "bgColor": "#4DB33D", "color": "#ffffff", "icon": "database"},
+            {"name": "Node.js", "bgColor": "#339933", "color": "#ffffff", "icon": "nodejs"},
+            {"name": "Python", "bgColor": "#3776AB", "color": "#ffffff", "icon": "python"},
+            {"name": "React", "bgColor": "#61DAFB", "color": "#000000", "icon": "react"},
+            {"name": "Spring Boot", "bgColor": "#6DB33F", "color": "#ffffff", "icon": "spring"},
+        ]
+        
+        # Check and create each skill if it doesn't exist
+        for skill_data in default_skills:
+            existing_skill = db.query(Skill).filter(Skill.name == skill_data["name"]).first()
+            if not existing_skill:
+                new_skill = Skill(
+                    name=skill_data["name"],
+                    bgColor=skill_data["bgColor"],
+                    color=skill_data["color"],
+                    icon=skill_data["icon"]
+                )
+                db.add(new_skill)
+        
+        db.commit()
 ###
 # Authentication
 ###
@@ -1033,7 +1115,8 @@ def prof_or_ta_required(token: str = Depends(oauth2_scheme), db: Session = Depen
 
 # Initialize default data
 create_default_roles()
-create_default_admin()
+create_default_prof()  # Create Indranil Saha
+create_default_skills()  
 
 # Authentication endpoints
 @app.post("/login")
@@ -1281,7 +1364,7 @@ async def upload_students(
                 
             except Exception as e:
                 errors.append(f"Error processing student {student}: {str(e)}")
-        
+        reset_sequence("users", db)
         return {
             "message": f"Processed {len(created_students)} students",
             "created_students": created_students,
@@ -4677,7 +4760,8 @@ async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
 
         # Clean up the temporary file
         os.remove(temp_file_path)
-
+        reset_sequence("teams", db)
+        reset_sequence("team_members", db)
         return {"detail": "File uploaded and data saved successfully!"}
     except Exception as e:
         db.rollback()  # In case of error, rollback
