@@ -3009,8 +3009,8 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
                 # # Extract and validate username
                 # username = row['username'].strip()
                 # Extract and validate roll no
-                roll_no = row['RollNo'].strip()
-                if not roll_no:
+                RollNo = row['RollNo'].strip()
+                if not RollNo:
                     continue
                 
                 # Extract and validate score
@@ -3024,7 +3024,7 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
                     raise ValueError(f"Invalid score format in row {row_num}")
                 
                 # Get user ID from roll number
-                user = db.query(User).filter(User.id == roll_no).first()
+                user = db.query(User).filter(User.id == RollNo).first()
             
                 if not user:
                     unadded_users.append(user)
@@ -4691,81 +4691,154 @@ from sqlalchemy.orm import Session
 async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
     if not file.filename.endswith('.csv'):
         raise HTTPException(status_code=400, detail="Invalid file format. Please upload a CSV file.")
-
     try:
-        # Save the uploaded file to a temporary location
-        temp_file_path = f"temp_{file.filename}"
-        with open(temp_file_path, "wb") as temp_file:
-            temp_file.write(file.file.read())
-
-        # Read the CSV file using pandas
-        df = pd.read_csv(temp_file_path)
-
-        # Validate the CSV format
-        required_columns = ['team_name', 'member1', 'member2', 'member3', 'member4', 'member5', 'member6', 'member7', 'member8', 'member9', 'member10']
-        print(df.columns)
-        for _column_name in required_columns:
-            if _column_name not in df.columns:
-                raise HTTPException(status_code=400, detail=f"Invalid CSV format. Missing column: {_column_name}")
-
-        # Check if all members exist in the Users database and perform other checks
-        team_names = set()
-        members_set = list()
-        for _, row in df.iterrows():
-            team_name = row['team_name']
-            members = []
-            for i in range(1, 11):
-                member = row[f'member{i}']
-                if pd.notna(member) and member.strip():  # Add check for empty strings
-                    members.append(member)
-
-            if team_name in team_names:
-                raise HTTPException(status_code=400, detail=f"Invalid file: Duplicate team name '{team_name}' found.")
-            
-            team_names.add(team_name)
-
-            for member_name in members:
-                user = db.query(User).filter_by(username=member_name).first()
-                if not user:
-                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' does not exist in the database.")
-                if user.team_id:
-                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is already assigned to a team.")
-                if member_name in members_set:
-                    raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is assigned to multiple teams.")
-            members_set.append(members)
-
-        team_names = list(team_names)
-        print("Team names: ", team_names)
-        print("Members set:", members_set)
+        contents = await file.read()
+        text_contents = contents.decode('utf-8')
+        df = pd.read_csv(StringIO(text_contents))
         
-        for i in range(len(team_names)):
-            team_name = team_names[i]
-            members = members_set[i]
-            # print(members)
-            # Create and save the team first
-            team = Team(name=team_name)
-            db.add(team)
-            db.commit()  # Commit to get the team ID
-            db.refresh(team)  # Make sure we have the latest data including the ID
+        # Validate required columns
+        required_columns = ['RollNo', 'TeamID']
+        for column in required_columns:
+            if column not in df.columns:
+                raise HTTPException(status_code=400, detail=f"Missing required column: {column}")
+        
+        # Group students by team ID
+        team_to_users = {}
+        for _, row in df.iterrows():
+            roll_no = row['RollNo']
+            team_id = row['TeamID']
             
-            # Now add users to the team with the valid team ID
-            for member in members:
-                user = db.query(User).filter_by(username=member).first()
-                print("Over here")
-                if user:
+            # Skip rows with empty team IDs
+            if pd.isna(team_id) or pd.isna(roll_no):
+                continue
+            
+            team_id = int(team_id)
+            if team_id not in team_to_users:
+                team_to_users[team_id] = []
+            
+            # Find the user with this roll number
+            user = db.query(User).filter(User.id == roll_no).first()
+            if not user:
+                raise HTTPException(status_code=400, detail=f"User with Roll No {roll_no} not found")
+            
+            team_to_users[team_id].append(user)
+        
+        # Create or update teams
+        created_teams = []
+        updated_teams = []
+        for team_id, users in team_to_users.items():
+            print("Handling team id:", team_id)
+            # Check if team already exists
+            team = db.query(Team).filter(Team.id == team_id).first()
+            
+            if team:
+                # Update existing team
+                for user in users:
+                    if user not in team.members:
+                        team.members.append(user)
+                        user.team_id = team.id
+                updated_teams.append(team_id)
+            else:
+                # Create new team
+                team = Team(id=team_id, name=f"Team {team_id}")
+                db.add(team)
+                db.flush()  # Get the ID without committing
+                
+                for user in users:
                     team.members.append(user)
-                    user.team_id = team.id  # Now team.id is valid
-            
-            db.commit()  # Commit changes for this team's users
-
-        # Clean up the temporary file
-        os.remove(temp_file_path)
-        reset_sequence("teams", db)
-        reset_sequence("team_members", db)
-        return {"detail": "File uploaded and data saved successfully!"}
+                    user.team_id = team.id
+                created_teams.append(team_id)
+        
+        db.commit()
+        
+        return {
+            "message": "Teams created and updated successfully",
+            "created_teams": created_teams,
+            "updated_teams": updated_teams,
+            "total_teams": len(team_to_users),
+            "total_students_assigned": sum(len(users) for users in team_to_users.values())
+        }
+    except HTTPException as e:
+        db.rollback()
+        raise e
     except Exception as e:
-        db.rollback()  # In case of error, rollback
-        raise HTTPException(status_code=500, detail=str(e))
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
+
+    
+    # try:
+    #     # Save the uploaded file to a temporary location
+    #     temp_file_path = f"temp_{file.filename}"
+    #     with open(temp_file_path, "wb") as temp_file:
+    #         temp_file.write(file.file.read())
+
+    #     # Read the CSV file using pandas
+    #     df = pd.read_csv(temp_file_path)
+
+    #     # Validate the CSV format
+    #     required_columns = ['team_name', 'member1', 'member2', 'member3', 'member4', 'member5', 'member6', 'member7', 'member8', 'member9', 'member10']
+    #     print(df.columns)
+    #     for _column_name in required_columns:
+    #         if _column_name not in df.columns:
+    #             raise HTTPException(status_code=400, detail=f"Invalid CSV format. Missing column: {_column_name}")
+
+    #     # Check if all members exist in the Users database and perform other checks
+    #     team_names = set()
+    #     members_set = list()
+    #     for _, row in df.iterrows():
+    #         team_name = row['team_name']
+    #         members = []
+    #         for i in range(1, 11):
+    #             member = row[f'member{i}']
+    #             if pd.notna(member) and member.strip():  # Add check for empty strings
+    #                 members.append(member)
+
+    #         if team_name in team_names:
+    #             raise HTTPException(status_code=400, detail=f"Invalid file: Duplicate team name '{team_name}' found.")
+            
+    #         team_names.add(team_name)
+
+    #         for member_name in members:
+    #             user = db.query(User).filter_by(username=member_name).first()
+    #             if not user:
+    #                 raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' does not exist in the database.")
+    #             if user.team_id:
+    #                 raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is already assigned to a team.")
+    #             if member_name in members_set:
+    #                 raise HTTPException(status_code=400, detail=f"Invalid file: User '{member_name}' is assigned to multiple teams.")
+    #         members_set.append(members)
+
+    #     team_names = list(team_names)
+    #     print("Team names: ", team_names)
+    #     print("Members set:", members_set)
+        
+    #     for i in range(len(team_names)):
+    #         team_name = team_names[i]
+    #         members = members_set[i]
+    #         # print(members)
+    #         # Create and save the team first
+    #         team = Team(name=team_name)
+    #         db.add(team)
+    #         db.commit()  # Commit to get the team ID
+    #         db.refresh(team)  # Make sure we have the latest data including the ID
+            
+    #         # Now add users to the team with the valid team ID
+    #         for member in members:
+    #             user = db.query(User).filter_by(username=member).first()
+    #             print("Over here")
+    #             if user:
+    #                 team.members.append(user)
+    #                 user.team_id = team.id  # Now team.id is valid
+            
+    #         db.commit()  # Commit changes for this team's users
+
+    #     # Clean up the temporary file
+    #     os.remove(temp_file_path)
+
+    #     return {"detail": "File uploaded and data saved successfully!"}
+    # except Exception as e:
+    #     db.rollback()  # In case of error, rollback
+    #     raise HTTPException(status_code=500, detail=str(e))
     
 
 
@@ -6606,3 +6679,38 @@ async def get_user_skills(
             status_code=500,
             detail=f"Error fetching user skills: {str(e)}"
         )
+
+@app.get("/tas", response_model=List[dict])
+async def get_all_tas(db: Session = Depends(get_db)):
+    """
+    Get all TAs with their skills from the database
+    """
+    try:
+        # Get all users with role_id = 3 (TAs)
+        ta_role_id = 3  # Assuming 3 is the role_id for TAs
+        tas = db.query(User).filter(User.role_id == ta_role_id).all()
+        
+        result = []
+        for ta in tas:
+            # Get skills for this TA
+            skills = []
+            for skill in ta.skills:
+                skills.append({
+                    "id": skill.id,
+                    "name": skill.name,
+                    "bgColor": skill.bgColor,
+                    "color": skill.color,
+                    "icon": skill.icon
+                })
+            
+            # Add TA with their skills to result
+            result.append({
+                "id": ta.id,
+                "name": ta.name,
+                "email": ta.email,
+                "skills": skills
+            })
+        
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching TAs: {str(e)}")
