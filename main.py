@@ -3,7 +3,7 @@ import json
 from fastapi import FastAPI, Depends, HTTPException, status, UploadFile, Query, Header, Body, File, Form as FastAPIForm, WebSocket, WebSocketDisconnect, WebSocketException
 from fastapi.responses import JSONResponse, Response, FileResponse
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text, Float, JSON
+from sqlalchemy import ForeignKey, create_engine, Column, Integer, String, Enum, Table, Text, DateTime, text, Float, Boolean, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session, relationship, validates
 from sqlalchemy.dialects.postgresql import JSONB, insert
@@ -564,6 +564,19 @@ class UserOTP(Base):
     
     # Relationship with User
     user = relationship("User", backref="otp_record")
+
+# Course Config Table
+class CourseConfig(Base):
+    __tablename__ = "course_config"
+    id = Column(Integer, primary_key=True)
+    team_phase_enabled = Column(Boolean, default=True, nullable=False)
+    discussions_enabled = Column(Boolean, default=True, nullable=False)
+    feedback_enabled = Column(Boolean, default=True, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.now(timezone.utc), onupdate=datetime.now(timezone.utc))
+    updated_by = Column(Integer, ForeignKey("users.id"), nullable=False)
+
+    # Relationship with the user who last updated the config
+    updated_by_user = relationship("User", foreign_keys=[updated_by])
 
 def get_db():
     db = SessionLocal()
@@ -4017,6 +4030,14 @@ async def submit_student_feedback(
 ):
     """Submit feedback for team members"""
     try:
+        # First check if feedback is enabled
+        config = db.query(CourseConfig).first()
+        if not config or not config.feedback_enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="Feedback is currently disabled. You cannot submit feedback at this time."
+            )
+            
         user = current_user["user"]
         
         # Check if user is a student
@@ -4371,6 +4392,14 @@ async def get_discussions_page(
     current_user_data: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # First check if discussions are enabled
+    config = db.query(CourseConfig).first()
+    if not config or not config.discussions_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Discussions are currently disabled. You cannot access discussions at this time."
+        )
+
     user = current_user_data["user"]
     if not user:
         raise HTTPException(status_code=404, detail=f"User not found: {user.name}")
@@ -4519,6 +4548,14 @@ async def get_messages(
     current_user_data: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # First check if discussions are enabled
+    config = db.query(CourseConfig).first()
+    if not config or not config.discussions_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Discussions are currently disabled. You cannot access discussions at this time."
+        )
+
     user = current_user_data["user"]
     
     # Validate user's access to the channel
@@ -4552,6 +4589,14 @@ async def send_message(
     current_user_data: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ): 
+    # First check if discussions are enabled
+    config = db.query(CourseConfig).first()
+    if not config or not config.discussions_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Discussions are currently disabled. You cannot access discussions at this time."
+        )
+
     user = current_user_data["user"]
 
     if(message.sender_id != user.id):
@@ -4618,6 +4663,14 @@ async def websocket_endpoint(
     # current_user_data: dict = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # First check if discussions are enabled
+    config = db.query(CourseConfig).first()
+    if not config or not config.discussions_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Discussions are currently disabled. You cannot access discussions at this time."
+        )
+
     # print("In here")
     current_user_data = get_current_user_from_string(token , db)
     if not current_user_data:
@@ -4648,6 +4701,14 @@ async def download_file(
     db: Session = Depends(get_db),
     current_user: dict = Depends(get_current_user)
 ):
+    # First check if discussions are enabled
+    config = db.query(CourseConfig).first()
+    if not config or not config.discussions_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Discussions are currently disabled. You cannot access discussions at this time."
+        )
+
     """Download a file and return it as base64 encoded data"""
     try:
         # Get the file record from the database
@@ -4684,8 +4745,6 @@ async def download_file(
         raise he
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error downloading file: {str(e)}")
-
-from sqlalchemy.orm import Session
 
 @app.post("/teams/upload-csv/")
 async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
@@ -5427,6 +5486,14 @@ async def submit_student_feedback(
 ):
     """Submit feedback for team members"""
     try:
+        # First check if feedback is enabled
+        config = db.query(CourseConfig).first()
+        if not config or not config.feedback_enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="Feedback is currently disabled. You cannot submit feedback at this time."
+            )
+
         user = current_user["user"]
         
         # Check if user is a student
@@ -6394,6 +6461,14 @@ async def invite_to_team(
     db: Session = Depends(get_db)
 ):
     try:
+        # First check if team phase is enabled
+        config = db.query(CourseConfig).first()
+        if not config or not config.team_phase_enabled:
+            raise HTTPException(
+                status_code=403,
+                detail="Team phase is currently disabled. You cannot invite users to teams at this time."
+            )
+
         invited_user_id = int(invite.user_id)  # Update to use invite.user_id
         user = current_user["user"]
 
@@ -6470,6 +6545,14 @@ async def join_team(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # First check if team phase is enabled
+    config = db.query(CourseConfig).first()
+    if not config or not config.team_phase_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Team phase is currently disabled. You cannot join teams at this time."
+        )
+
     invite_team_id = int(invite.team_id)  # Update to use invite.team_id
     user = current_user["user"]
     # Check if user is a student
@@ -6507,6 +6590,14 @@ async def create_team(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
+    # First check if team phase is enabled
+    config = db.query(CourseConfig).first()
+    if not config or not config.team_phase_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="Team phase is currently disabled. You cannot create teams at this time."
+        )
+    
     team_name = team.name
     user = current_user["user"]
     # Check if user is a student
@@ -6714,3 +6805,136 @@ async def get_all_tas(db: Session = Depends(get_db)):
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching TAs: {str(e)}")
+
+
+# Schema for update requests
+class ConfigUpdateRequest(BaseModel):
+    enabled: bool
+
+# GET routes to check configuration status
+@app.get("/config/team-phase")
+async def get_team_phase_status(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    config = db.query(CourseConfig).first()
+    if not config:
+        config = CourseConfig(
+            team_phase_enabled=True,
+            discussions_enabled=True,
+            feedback_enabled=True,
+            updated_by=1  # Default admin/prof ID
+        )
+        db.add(config)
+        db.commit()
+    return {"enabled": config.team_phase_enabled}
+
+@app.get("/config/discussions")
+async def get_discussions_status(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):  
+    config = db.query(CourseConfig).first()
+    if not config:
+        config = CourseConfig(
+            team_phase_enabled=True,
+            discussions_enabled=True,
+            feedback_enabled=True,
+            updated_by=1
+        )
+        db.add(config)
+        db.commit()
+    return {"enabled": config.discussions_enabled}
+
+@app.get("/config/feedback")
+async def get_feedback_status(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+): 
+    config = db.query(CourseConfig).first()
+    if not config:
+        config = CourseConfig(
+            team_phase_enabled=True,
+            discussions_enabled=True,
+            feedback_enabled=True,
+            updated_by=1
+        )
+        db.add(config)
+        db.commit()
+    return {"enabled": config.feedback_enabled}
+
+# PUT routes to update configurations (professor only)
+@app.put("/config/team-phase")
+async def update_team_phase_status(
+    request: ConfigUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user["role"] != RoleType.PROF:
+        raise HTTPException(status_code=403, detail="Only professors can update course configurations")
+    
+    config = db.query(CourseConfig).first()
+    if not config:
+        config = CourseConfig(
+            team_phase_enabled=request.enabled,
+            discussions_enabled=True,
+            feedback_enabled=True,
+            updated_by=current_user["user"].id
+        )
+        db.add(config)
+    else:
+        config.team_phase_enabled = request.enabled
+        config.updated_by = current_user["user"].id
+    
+    db.commit()
+    return {"enabled": config.team_phase_enabled}
+
+@app.put("/config/discussions")
+async def update_discussions_status(
+    request: ConfigUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user["role"] != RoleType.PROF:
+        raise HTTPException(status_code=403, detail="Only professors can update course configurations")
+    
+    config = db.query(CourseConfig).first()
+    if not config:
+        config = CourseConfig(
+            team_phase_enabled=True,
+            discussions_enabled=request.enabled,
+            feedback_enabled=True,
+            updated_by=current_user["user"].id
+        )
+        db.add(config)
+    else:
+        config.discussions_enabled = request.enabled
+        config.updated_by = current_user["user"].id
+    
+    db.commit()
+    return {"enabled": config.discussions_enabled}
+
+@app.put("/config/feedback")
+async def update_feedback_status(
+    request: ConfigUpdateRequest,
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user["role"] != RoleType.PROF:
+        raise HTTPException(status_code=403, detail="Only professors can update course configurations")
+    
+    config = db.query(CourseConfig).first()
+    if not config:
+        config = CourseConfig(
+            team_phase_enabled=True,
+            discussions_enabled=True,
+            feedback_enabled=request.enabled,
+            updated_by=current_user["user"].id
+        )
+        db.add(config)
+    else:
+        config.feedback_enabled = request.enabled
+        config.updated_by = current_user["user"].id
+    
+    db.commit()
+    return {"enabled": config.feedback_enabled}
