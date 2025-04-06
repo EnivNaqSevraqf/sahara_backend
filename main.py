@@ -2926,8 +2926,8 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
                 # # Extract and validate username
                 # username = row['username'].strip()
                 # Extract and validate roll no
-                roll_no = row['RollNo'].strip()
-                if not roll_no:
+                RollNo = row['RollNo'].strip()
+                if not RollNo:
                     continue
                 
                 # Extract and validate score
@@ -2941,7 +2941,7 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
                     raise ValueError(f"Invalid score format in row {row_num}")
                 
                 # Get user ID from roll number
-                user = db.query(User).filter(User.id == roll_no).first()
+                user = db.query(User).filter(User.id == RollNo).first()
             
                 if not user:
                     unadded_users.append(user)
@@ -6596,3 +6596,38 @@ async def get_user_skills(
             status_code=500,
             detail=f"Error fetching user skills: {str(e)}"
         )
+
+@app.get("/tas", response_model=List[dict])
+async def get_all_tas(db: Session = Depends(get_db)):
+    """
+    Get all TAs with their skills from the database
+    """
+    try:
+        # Get all users with role_id = 3 (TAs)
+        ta_role_id = 3  # Assuming 3 is the role_id for TAs
+        tas = db.query(User).filter(User.role_id == ta_role_id).all()
+        
+        result = []
+        for ta in tas:
+            # Get skills for this TA
+            skills = []
+            for skill in ta.skills:
+                skills.append({
+                    "id": skill.id,
+                    "name": skill.name,
+                    "bgColor": skill.bgColor,
+                    "color": skill.color,
+                    "icon": skill.icon
+                })
+            
+            # Add TA with their skills to result
+            result.append({
+                "id": ta.id,
+                "name": ta.name,
+                "email": ta.email,
+                "skills": skills
+            })
+        
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching TAs: {str(e)}")
