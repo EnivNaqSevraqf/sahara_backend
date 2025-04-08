@@ -39,6 +39,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.utils import formatdate
+from constants import DATABASE_URL
 # Create uploads directory if it doesn't exist
 os.makedirs("uploads", exist_ok=True)
 
@@ -48,7 +49,6 @@ from read_csv import extract_student_data_from_content, extract_ta_data_from_con
 
 
 # Database setup - postgres
-DATABASE_URL = "postgresql://avnadmin:AVNS_YfDPPydQ-Ax7FLzuLkD@pg-b1db5cd-sahara-raf.f.aivencloud.com:12051/defaultdb?sslmode=require"
 Base = declarative_base()
 
 # Create engine
