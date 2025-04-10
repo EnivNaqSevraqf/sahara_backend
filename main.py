@@ -6312,6 +6312,8 @@ async def get_user_data(
         # Decode the token to get the username
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
+
+        print("Decoded payload:", payload)  # Debugging line
         if not username:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -6547,14 +6549,18 @@ async def update_user_skills(
 ):
     """Update skills for the currently logged in TA"""
     try:
-        user = current_user["user"]
+        # Get user ID from current_user
+        user_id = current_user["user"].id
+        
+        # Query for the user again with the current session
+        user = db.query(User).filter(User.id == user_id).first()
         
         # Check if user is a TA
-        if current_user["role"] != RoleType.TA:
-            raise HTTPException(
-                status_code=403,
-                detail="Only TAs can update their skills"
-            )
+        # if current_user["role"] != RoleType.TA:
+        #     raise HTTPException(
+        #         status_code=403,
+        #         detail="Only TAs can update their skills"
+        #     )
         
         # Get skill_ids from request body
         skill_ids = request.get("skill_ids", [])
@@ -6601,7 +6607,6 @@ async def update_user_skills(
             status_code=500,
             detail=f"Error updating skills: {str(e)}"
         )
-
 @app.get("/api/skills")
 async def get_all_available_skills(
     current_user: dict = Depends(get_current_user),
@@ -6647,14 +6652,18 @@ async def get_user_skills(
 ):
     """Get currently logged-in TA's skills"""
     try:
-        user = current_user["user"]
+        # Get user ID from current_user
+        user_id = current_user["user"].id
         
+        # Query for the user again with the current session
+        user = db.query(User).filter(User.id == user_id).first()
+        # print("Current user:", current_user)  # Debugging line
         # Check if user is a TA
-        if current_user["role"] != RoleType.TA:
-            raise HTTPException(
-                status_code=403,
-                detail="Only TAs can view their skills"
-            )
+        # if current_user["role"] != RoleType.TA:
+        #     raise HTTPException(
+        #         status_code=403,
+        #         detail="Only TAs can view their skills"
+        #     )
 
         # Get user's current skills
         skills = user.skills
@@ -6679,6 +6688,7 @@ async def get_user_skills(
             status_code=500,
             detail=f"Error fetching user skills: {str(e)}"
         )
+
 
 @app.get("/tas", response_model=List[dict])
 async def get_all_tas(db: Session = Depends(get_db)):
