@@ -6933,19 +6933,16 @@ async def get_active_teams(db: Session = Depends(get_db)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching active teams: {str(e)}")
 
-@app.get("/api/stats/deadlines-this-week")
-async def get_deadlines_this_week(db: Session = Depends(get_db)):
-    """Get the count of deadlines this week."""
+@app.get("/api/stats/number-of-students")
+async def get_number_of_students(db: Session = Depends(get_db)):
+    """Get the total number of students."""
     try:
-        now = datetime.now(timezone.utc)
-        end_of_week = now + timedelta(days=(6 - now.weekday()))
-        deadlines_count = db.query(Submittable).filter(
-            Submittable.deadline >= now,
-            Submittable.deadline <= end_of_week
-        ).count()
-        return {"deadlinesThisWeek": deadlines_count}
+        # Assuming the role_id for students is 2
+        student_role_id = db.query(Role).filter(Role.role == RoleType.STUDENT).first().id
+        number_of_students = db.query(User).filter(User.role_id == student_role_id).count()
+        return {"numberOfStudents": number_of_students}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error fetching deadlines this week: {str(e)}")    
+        raise HTTPException(status_code=500, detail=f"Error fetching number of students: {str(e)}")
 
 @app.put("/config/feedback")
 async def update_feedback_status(
