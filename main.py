@@ -6924,6 +6924,29 @@ async def update_discussions_status(
     db.commit()
     return {"enabled": config.discussions_enabled}
 
+@app.get("/api/stats/active-teams")
+async def get_active_teams(db: Session = Depends(get_db)):
+    """Get the count of active teams."""
+    try:
+        active_teams_count = db.query(Team).count()
+        return {"activeTeams": active_teams_count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching active teams: {str(e)}")
+
+@app.get("/api/stats/deadlines-this-week")
+async def get_deadlines_this_week(db: Session = Depends(get_db)):
+    """Get the count of deadlines this week."""
+    try:
+        now = datetime.now(timezone.utc)
+        end_of_week = now + timedelta(days=(6 - now.weekday()))
+        deadlines_count = db.query(Submittable).filter(
+            Submittable.deadline >= now,
+            Submittable.deadline <= end_of_week
+        ).count()
+        return {"deadlinesThisWeek": deadlines_count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching deadlines this week: {str(e)}")    
+
 @app.put("/config/feedback")
 async def update_feedback_status(
     request: ConfigUpdateRequest,
