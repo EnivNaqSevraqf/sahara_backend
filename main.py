@@ -2654,20 +2654,20 @@ async def api_get_user_response(form_id: int, user_id: int, db: Session = Depend
     response = get_user_response_db(form_id, user_id, db)
     return JSONResponse(status_code=200, content=response)
 
-@app.get("/api/skills/")
-async def get_all_skills(db: Session = Depends(get_db)):
-    """Get all skills from the database"""
-    skills = db.query(Skill).all()
-    results = []
-    for skill in skills:
-        results.append({
-            "id": skill.id,
-            "name": skill.name,
-            "bgColor": skill.bgColor,
-            "color": skill.color,
-            "icon": skill.icon
-        })
-    return JSONResponse(status_code=200, content=results)
+# @app.get("/api/skills/")
+# async def get_all_skills(db: Session = Depends(get_db)):
+#     """Get all skills from the database"""
+#     skills = db.query(Skill).all()
+#     results = []
+#     for skill in skills:
+#         results.append({
+#             "id": skill.id,
+#             "name": skill.name,
+#             "bgColor": skill.bgColor,
+#             "color": skill.color,
+#             "icon": skill.icon
+#         })
+#     return JSONResponse(status_code=200, content=results)
 
 @app.post("/api/skills/create")
 async def create_skill(skill: SkillCreate, db: Session = Depends(get_db), token: str = Depends(prof_or_ta_required)):
@@ -6801,11 +6801,11 @@ async def get_all_available_skills(
     """Get all available skills from the database"""
     try:
         # Only TAs can access skills
-        if current_user["role"] != RoleType.TA:
-            raise HTTPException(
-                status_code=403,
-                detail="Only TAs can view and manage skills"
-            )
+        # if current_user["role"] != RoleType.TA:
+        #     raise HTTPException(
+        #         status_code=403,
+        #         detail="Only TAs can view and manage skills"
+        #     )
 
         # Query all skills from the database
         skills = db.query(Skill).all()
