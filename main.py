@@ -6248,6 +6248,16 @@ async def delete_assignment(
         # Check if user is professor or the student who submitted
         user = current_user["user"]
         if current_user["role"] == RoleType.STUDENT:
+            #Check if assignment end time has passed for student
+            assignable = db.query(Assignable).filter(Assignable.id == assignment.assignable_id).first()
+            if not assignable:
+                raise HTTPException(status_code=404, detail="Assignable not found")
+            
+            now = datetime.now(timezone.utc)
+            deadline = datetime.fromisoformat(assignable.deadline)
+            if now > deadline:
+                raise HTTPException(status_code=400, detail="Cannot delete assignment after deadline")
+            
             # For students, check if they belong to the team that submitted
             if user.id != assignment.user_id:
                 raise HTTPException(status_code=403, detail="You can only delete your own submissions")
