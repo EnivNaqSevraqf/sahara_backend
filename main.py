@@ -853,6 +853,12 @@ class CalendarEvent(BaseModel):
     # color: str = None
     # allDay: bool = False
 
+class CalendarUpdateEventModel(BaseModel):
+    event_id: str
+    start: str
+    end: str
+    title: str
+    subtitle: str
 class CalendarUpdateModel(BaseModel):
     events: List[CalendarEvent]
     # token: str = Header(None)
@@ -2181,32 +2187,32 @@ def create_calendar(
 
         # return JSONResponse(status_code=201, content={"message": "Personal event created", "event": new_event})
 
-@app.post("/calendar/update")
-def update_calendar(
-    calendar_update_model: CalendarUpdateModel,
-    db: Session = Depends(get_db),
-    # user_id: int = Depends(resolve_token)
-):
-    # user = db.query(User).filter_by(id=user_id).first()
-    print(calendar_update_model.events)
-    global_events = calendar_update_model.events
-    # global_events, personal_events, team_events = split_events(calendar_update_model.events)
-    print(global_events)
-    overwrite_global_events(global_events, db)
-    return {"message": "Calendar updated"}
-    # if user.role == RoleType.PROF:
-    #     overwrite_global_events(events, db)
-    # elif user.role == RoleType.STUDENT:
-    #     overwrite_personal_events(user, events, db)
-    # elif user.role == RoleType.TA:
-    #     overwrite_team_events(user, events, db)
-    # return {"message": "Calendar updated"}
-    # if the role is admin
-    # select all the global events
+# @app.post("/calendar/update")
+# def update_calendar(
+#     calendar_update_model: CalendarUpdateModel,
+#     db: Session = Depends(get_db),
+#     # user_id: int = Depends(resolve_token)
+# ):
+#     # user = db.query(User).filter_by(id=user_id).first()
+#     print(calendar_update_model.events)
+#     global_events = calendar_update_model.events
+#     # global_events, personal_events, team_events = split_events(calendar_update_model.events)
+#     print(global_events)
+#     overwrite_global_events(global_events, db)
+#     return {"message": "Calendar updated"}
+#     # if user.role == RoleType.PROF:
+#     #     overwrite_global_events(events, db)
+#     # elif user.role == RoleType.STUDENT:
+#     #     overwrite_personal_events(user, events, db)
+#     # elif user.role == RoleType.TA:
+#     #     overwrite_team_events(user, events, db)
+#     # return {"message": "Calendar updated"}
+#     # if the role is admin
+#     # select all the global events
 
-    # overwrite_global_events
+#     # overwrite_global_events
     
-    pass
+#     pass
 @app.delete("/calendar/delete/{event_id}")
 def delete_calendar_event(
     event_id: str,
@@ -2272,6 +2278,79 @@ def delete_calendar_event(
         return JSONResponse(status_code=200, content={"message": "Event deleted"})
     else:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid event ID")
+
+@app.put("/calendar/update/")
+def update_calendar_event(
+    calendar_event_update_model: CalendarUpdateEventModel,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    event_id = calendar_event_update_model.event_id
+    user = current_user["user"]
+    role = current_user["role"]
+    if event_id[0] == "g":
+        # Check if the user is professor
+        if role != RoleType.PROF:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete global events")
+        event_id = int(event_id[1:])
+        # Check if the event exists
+        event = db.query(NewGlobalCalendarEvent).filter_by(id=event_id).first()
+
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+
+        event.title = calendar_event_update_model.title
+        event.subtitle = calendar_event_update_model.subtitle
+        event.start = calendar_event_update_model.start
+        event.end = calendar_event_update_model.end
+        # Commit the changes instead of deleting the event
+        db.commit()
+        return JSONResponse(status_code=200, content={"message": "Event updated"})
+    elif event_id[0] == "p":
+        # Check if event exists
+        event_id = int(event_id[1:])
+        event = db.query(NewUserCalendarEvent).filter_by(id=event_id).first()
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+        # Check if the user is the creator of the event
+        if event.user_id != user.id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete this event")
+        
+        event.title = calendar_event_update_model.title
+        event.subtitle = calendar_event_update_model.subtitle
+        event.start = calendar_event_update_model.start
+        event.end = calendar_event_update_model.end
+        # Commit the changes instead of deleting the event
+        db.commit()
+        return JSONResponse(status_code=200, content={"message": "Event deleted"})
+
+    elif event_id[0] == "t":
+        event_id = int(event_id[1:])
+        # Check if the user is in a team
+        if not user.team_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete team events")
+        # Check if event exists
+        event = db.query(NewTeamCalendarEvent).filter_by(id=event_id).first()
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+        
+        # Check if the user is the creator of the event
+        if event.team_id != user.team_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to delete this event")
+        
+        event = db.query(NewTeamCalendarEvent).filter_by(id=event_id).first()
+        if not event:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Event not found")
+        
+        event.title = calendar_event_update_model.title
+        event.subtitle = calendar_event_update_model.subtitle
+        event.start = calendar_event_update_model.start
+        event.end = calendar_event_update_model.end
+        db.commit()
+        return JSONResponse(status_code=200, content={"message": "Event updated"})
+    else:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid event ID")
+    pass
 
 @app.get("/people/")
 def get_people(db: Session = Depends(get_db)):
