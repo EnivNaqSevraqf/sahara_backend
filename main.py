@@ -4004,6 +4004,12 @@ async def delete_submission(
             # For students, check if they belong to the team that submitted
             if team.id != submission.team_id:
                 raise HTTPException(status_code=403, detail="You can only delete your own submissions")
+            
+            # Check is submission deadline has passed
+            now = datetime.now(timezone.utc)
+            deadline = datetime.fromisoformat(submission.submittable.deadline)
+            if now > deadline:
+                raise HTTPException(status_code=403, detail="Cannot delete submission after deadline")
         
         # Delete the submission file if it exists
         if submission.file_url:
@@ -6327,6 +6333,16 @@ async def delete_assignment(
         # Check if user is professor or the student who submitted
         user = current_user["user"]
         if current_user["role"] == RoleType.STUDENT:
+            #Check if assignment end time has passed for student
+            assignable = db.query(Assignable).filter(Assignable.id == assignment.assignable_id).first()
+            if not assignable:
+                raise HTTPException(status_code=404, detail="Assignable not found")
+            
+            now = datetime.now(timezone.utc)
+            deadline = datetime.fromisoformat(assignable.deadline)
+            if now > deadline:
+                raise HTTPException(status_code=400, detail="Cannot delete assignment after deadline")
+            
             # For students, check if they belong to the team that submitted
             if user.id != assignment.user_id:
                 raise HTTPException(status_code=403, detail="You can only delete your own submissions")
@@ -6458,6 +6474,8 @@ async def get_user_data(
         # Decode the token to get the username
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
+
+        print("Decoded payload:", payload)  # Debugging line
         if not username:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
@@ -6717,14 +6735,18 @@ async def update_user_skills(
 ):
     """Update skills for the currently logged in TA"""
     try:
-        user = current_user["user"]
+        # Get user ID from current_user
+        user_id = current_user["user"].id
+        
+        # Query for the user again with the current session
+        user = db.query(User).filter(User.id == user_id).first()
         
         # Check if user is a TA
-        if current_user["role"] != RoleType.TA:
-            raise HTTPException(
-                status_code=403,
-                detail="Only TAs can update their skills"
-            )
+        # if current_user["role"] != RoleType.TA:
+        #     raise HTTPException(
+        #         status_code=403,
+        #         detail="Only TAs can update their skills"
+        #     )
         
         # Get skill_ids from request body
         skill_ids = request.get("skill_ids", [])
@@ -6771,7 +6793,6 @@ async def update_user_skills(
             status_code=500,
             detail=f"Error updating skills: {str(e)}"
         )
-
 @app.get("/api/skills")
 async def get_all_available_skills(
     current_user: dict = Depends(get_current_user),
@@ -6817,14 +6838,18 @@ async def get_user_skills(
 ):
     """Get currently logged-in TA's skills"""
     try:
-        user = current_user["user"]
+        # Get user ID from current_user
+        user_id = current_user["user"].id
         
+        # Query for the user again with the current session
+        user = db.query(User).filter(User.id == user_id).first()
+        # print("Current user:", current_user)  # Debugging line
         # Check if user is a TA
-        if current_user["role"] != RoleType.TA:
-            raise HTTPException(
-                status_code=403,
-                detail="Only TAs can view their skills"
-            )
+        # if current_user["role"] != RoleType.TA:
+        #     raise HTTPException(
+        #         status_code=403,
+        #         detail="Only TAs can view their skills"
+        #     )
 
         # Get user's current skills
         skills = user.skills
@@ -6849,6 +6874,7 @@ async def get_user_skills(
             status_code=500,
             detail=f"Error fetching user skills: {str(e)}"
         )
+
 
 @app.get("/tas", response_model=List[dict])
 async def get_all_tas(db: Session = Depends(get_db)):
@@ -6992,6 +7018,26 @@ async def update_discussions_status(
     
     db.commit()
     return {"enabled": config.discussions_enabled}
+
+@app.get("/api/stats/active-teams")
+async def get_active_teams(db: Session = Depends(get_db)):
+    """Get the count of active teams."""
+    try:
+        active_teams_count = db.query(Team).count()
+        return {"activeTeams": active_teams_count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching active teams: {str(e)}")
+
+@app.get("/api/stats/number-of-students")
+async def get_number_of_students(db: Session = Depends(get_db)):
+    """Get the total number of students."""
+    try:
+        # Assuming the role_id for students is 2
+        student_role_id = db.query(Role).filter(Role.role == RoleType.STUDENT).first().id
+        number_of_students = db.query(User).filter(User.role_id == student_role_id).count()
+        return {"numberOfStudents": number_of_students}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching number of students: {str(e)}")
 
 @app.put("/config/feedback")
 async def update_feedback_status(
