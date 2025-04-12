@@ -3925,6 +3925,12 @@ async def delete_submission(
             # For students, check if they belong to the team that submitted
             if team.id != submission.team_id:
                 raise HTTPException(status_code=403, detail="You can only delete your own submissions")
+            
+            # Check is submission deadline has passed
+            now = datetime.now(timezone.utc)
+            deadline = datetime.fromisoformat(submission.submittable.deadline)
+            if now > deadline:
+                raise HTTPException(status_code=403, detail="Cannot delete submission after deadline")
         
         # Delete the submission file if it exists
         if submission.file_url:
