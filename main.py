@@ -3098,11 +3098,14 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
         unadded_users = []
         for row_num, row in enumerate(csv_reader, start=2):
             try:
-                # # Extract and validate username
-                # username = row['username'].strip()
                 # Extract and validate roll no
                 RollNo = row['RollNo'].strip()
                 if not RollNo:
+                    continue
+                try:
+                    RollNo = int(RollNo)  # Ensure it's an integer
+                except:
+                    unadded_users.append((RollNo, f"Invalid RollNo for {RollNo}"))
                     continue
                 
                 # Extract and validate score
@@ -3111,15 +3114,18 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
                     if score < 0 or score > max_points:
                         raise ValueError(f"Score must be between 0 and {max_points}")
                 except ValueError:
-                    # TODO add the code for skipped these users
+                    unadded_users.append((RollNo, f"Invalid score {score}"))
                     continue
-                    raise ValueError(f"Invalid score format in row {row_num}")
+
                 
                 # Get user ID from roll number
                 user = db.query(User).filter(User.id == RollNo).first()
-            
+
                 if not user:
-                    unadded_users.append(user)
+                    unadded_users.append((RollNo, "No user found"))
+                    continue
+                if user.role != RoleType.STUDENT:
+                    unadded_users.append((RollNo, "User is not a student"))
                     continue
                 print("Added user id:", user.id)
                 scores.append({
@@ -3137,18 +3143,19 @@ def parse_scores_from_csv(csv_content: str, gradeable_id: int, max_points: int, 
         student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
         if not student_role:
             raise ValueError("Student role not found in database")
-        
+        zero_added = [] 
         # Add default score of 0 for students not in CSV
-        students = db.query(User).filter(User.role_id == student_role.id).all()
+        students = db.query(User).filter(User.role == RoleType.STUDENT).all()
         for student in students:
             if student.id not in processed_user_ids:
+                zero_added.append(student.id)
                 scores.append({
                     'user_id': student.id,
                     'gradeable_id': gradeable_id,
                     'score': 0
                 })
         
-        return scores
+        return scores, unadded_users, zero_added
         
     except csv.Error as e:
         raise ValueError(f"Error parsing CSV file: {str(e)}")
@@ -3253,7 +3260,6 @@ async def get_gradeable_submissions(
 #         raise HTTPException(status_code=500, detail=f"Unexpected error uploading scores: {str(e)}")
         
         
-
 @app.post("/gradeables/create")
 async def create_gradeable(
     # gradeable: GradeableCreateRequest,
@@ -3266,7 +3272,6 @@ async def create_gradeable(
     """Create a new gradeable"""
     username = user_data.get('sub')
     user = db.query(User).filter(User.username == username).first()
-    print("2137")
     try:
         print("Title is", title, "Max points is", max_points, "Creator ID is", user.id)
         new_gradeable = Gradeable(
@@ -3275,17 +3280,14 @@ async def create_gradeable(
             creator_id=user.id
         )
         
-        print("Hello")
         db.add(new_gradeable)
         db.commit()
         db.refresh(new_gradeable)
-        print(new_gradeable.id)
-        print("HELLO")
 
         # Read and parse file content
         content = await file.read()
         content_str = content.decode('utf-8')
-        scores = parse_scores_from_csv(
+        scores, unadded_users, zero_added = parse_scores_from_csv(
             csv_content=content_str, 
             gradeable_id=new_gradeable.id, 
             max_points=new_gradeable.max_points,
@@ -3309,19 +3311,21 @@ async def create_gradeable(
                 db.add(new_submission)
         
         db.commit()
-        
+        print(zero_added)
         return JSONResponse(status_code=201, content={
             "id": new_gradeable.id,
             "title": new_gradeable.title,
             "max_points": int(new_gradeable.max_points),
             "creator_id": new_gradeable.creator_id,
+            "unadded_users": unadded_users,
+            "zero_added": zero_added,
         })
     except Exception as e:
         db.rollback()
         raise HTTPException(
             status_code=500,
-            detail=f"Error creating gradeable: {str(e)}"
-        )
+            detail="Internal server error"
+        ) 
 
 
 # def parse_scores_from_csv(csv_content: str, 
