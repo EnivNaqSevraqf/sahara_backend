@@ -4837,54 +4837,191 @@ async def download_file(
 
 @app.post("/teams/upload-csv/")
 async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)):
+    # Check file extension first
     if not file.filename.endswith('.csv'):
-        raise HTTPException(status_code=400, detail="Invalid file format. Please upload a CSV file.")
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": "Invalid file format",
+                "error_type": "file_format",
+                "message": "Please upload a CSV file with .csv extension."
+            }
+        )
+    
     try:
         contents = await file.read()
-        text_contents = contents.decode('utf-8')
-        df = pd.read_csv(StringIO(text_contents))
         
-        # Validate required columns
+        # Check if file is empty
+        if len(contents) == 0:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "Empty file",
+                    "error_type": "empty_file",
+                    "message": "The uploaded CSV file is empty. Please upload a file with valid data."
+                }
+            )
+        
+        text_contents = contents.decode('utf-8')
+        
+        # Check if file only contains whitespace
+        if text_contents.strip() == "":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "Empty file",
+                    "error_type": "empty_file",
+                    "message": "The uploaded CSV file contains no data. Please upload a file with valid content."
+                }
+            )
+        
+        # Try to parse CSV and catch parsing errors
+        # try:
+        #     df = pd.read_csv(StringIO(text_contents))
+            
+        #     # Check if DataFrame is empty (has no rows)
+        #     if df.empty:
+        #         return JSONResponse(
+        #             status_code=400,
+        #             content={
+        #                 "detail": "Empty data",
+        #                 "error_type": "empty_file",
+        #                 "message": "The CSV file contains headers but no data rows. Please add student data to your file."
+        #             }
+        #         )
+            
+        # except Exception as parse_error:
+        #     return JSONResponse(
+        #         status_code=400,
+        #         content={
+        #             "detail": "CSV parsing failed",
+        #             "error_type": "csv_parse_error",
+        #             "message": f"Unable to parse the CSV file: {str(parse_error)}"
+        #         }
+        #     )
+        df = pd.read_csv(StringIO(text_contents))
+        # Validate required columns in the CSV file
         required_columns = ['RollNo', 'TeamID']
-        for column in required_columns:
-            if column not in df.columns:
-                raise HTTPException(status_code=400, detail=f"Missing required column: {column}")
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "Missing required columns",
+                    "error_type": "missing_columns",
+                    "message": f"The CSV file is missing required columns: {', '.join(missing_columns)}",
+                    "missing_columns": missing_columns
+                }
+            )
         
         # Group students by team ID
         team_to_users = {}
-        for _, row in df.iterrows():
-            roll_no = row['RollNo']
-            team_id = row['TeamID']
-            
-            # Skip rows with empty team IDs
-            if pd.isna(team_id) or pd.isna(roll_no):
-                continue
-            
-            team_id = int(team_id)
-            if team_id not in team_to_users:
-                team_to_users[team_id] = []
-            
-            # Find the user with this roll number
-            user = db.query(User).filter(User.id == roll_no).first()
-            if not user:
-                raise HTTPException(status_code=400, detail=f"User with Roll No {roll_no} not found")
-            
-            team_to_users[team_id].append(user)
+        user_errors = []  # Track errors by user
+        
+        # Process each row in the CSV
+        for index, row in df.iterrows():
+            try:
+                # Check for missing values and create detailed error messages
+                missing_fields = []
+                
+                # Check each required field
+                if pd.isna(row['RollNo']):
+                    missing_fields.append('RollNo')
+                if pd.isna(row['TeamID']):
+                    missing_fields.append('TeamID')
+                
+                # If any fields are missing, add an error
+                if missing_fields:
+                    if 'RollNo' in missing_fields:
+                        # Special case for missing roll number
+                        user_errors.append({
+                            "roll_no": f"Row {index+1}",
+                            "error": f"Missing RollNo - cannot identify student"
+                        })
+                    else:
+                        # We have a roll number but other fields are missing
+                        user_errors.append({
+                            "roll_no": int(row['RollNo']),
+                            "error": f"Missing fields: {', '.join(missing_fields)}"
+                        })
+                    continue
+                
+                try:
+                    # Check for missing or empty values before conversion
+                    if 'RollNo' not in row or pd.isna(row['RollNo']) or str(row['RollNo']).strip() == '':
+                        user_errors.append({
+                            "roll_no": f"Row {index+1}",
+                            "error": "Missing RollNo"
+                        })
+                        continue
+                        
+                    if 'TeamID' not in row or pd.isna(row['TeamID']) or str(row['TeamID']).strip() == '':
+                        user_errors.append({
+                            "roll_no": int(row['RollNo']),
+                            "error": "Missing TeamID"
+                        })
+                        continue
+                        
+                    # Only attempt conversion if values exist and aren't empty
+                    roll_no = int(row['RollNo'])
+                    team_id = int(row['TeamID'])
+                except ValueError as ve:
+                    # Handle value conversion errors (for non-empty values that aren't valid integers)
+                    error_field = "RollNo" if "RollNo" in str(ve) else "TeamID"
+                    user_errors.append({
+                        "roll_no": f"Row {index+1}" if error_field == "RollNo" else int(row['RollNo']),
+                        "error": f"Invalid {error_field} format: {str(ve)}"
+                    })
+                    continue
+
+                # Find the user with this roll number
+                user = db.query(User).filter(User.id == roll_no).first()
+                if not user:
+                    user_errors.append({
+                        "roll_no": roll_no,
+                        "error": "User not found in system"
+                    })
+                    continue
+                
+                if team_id not in team_to_users:
+                    team_to_users[team_id] = []
+                
+                team_to_users[team_id].append(user)
+            except Exception as e:
+                # Handle general errors
+                error_roll = str(row.get('RollNo', 'Unknown')) if not pd.isna(row.get('RollNo', None)) else f"Row {index+1}"
+                user_errors.append({
+                    "roll_no": error_roll,
+                    "error": f"Unexpected error: {str(e)}"
+                })
         
         # Create or update teams
         created_teams = []
         updated_teams = []
+        team_assignments = {}  # Track user assignments
+        
         for team_id, users in team_to_users.items():
-            print("Handling team id:", team_id)
             # Check if team already exists
             team = db.query(Team).filter(Team.id == team_id).first()
+            
+            # Initialize team in assignments dictionary
+            team_assignments[str(team_id)] = []
             
             if team:
                 # Update existing team
                 for user in users:
-                    if user not in team.members:
+                    # Check if user is already in team to avoid duplicates
+                    member_ids = [m.id for m in team.members]
+                    if user.id not in member_ids:
                         team.members.append(user)
                         user.team_id = team.id
+                    
+                    # Add user to assignments dictionary
+                    team_assignments[str(team_id)].append({
+                        "id": user.id,
+                        "name": user.name,
+                        "username": user.username
+                    })
                 updated_teams.append(team_id)
             else:
                 # Create new team
@@ -4895,23 +5032,41 @@ async def upload_csv(file: UploadFile = File(...), db: Session = Depends(get_db)
                 for user in users:
                     team.members.append(user)
                     user.team_id = team.id
+                    
+                    # Add user to assignments dictionary
+                    team_assignments[str(team_id)].append({
+                        "id": user.id,
+                        "name": user.name,
+                        "username": user.username
+                    })
                 created_teams.append(team_id)
         
         db.commit()
         
-        return {
+        # Ensure all response data is serializable
+        response_data = {
             "message": "Teams created and updated successfully",
             "created_teams": created_teams,
             "updated_teams": updated_teams,
             "total_teams": len(team_to_users),
-            "total_students_assigned": sum(len(users) for users in team_to_users.values())
+            "total_students_assigned": sum(len(users) for users in team_to_users.values()),
+            "team_assignments": team_assignments,  # User details by team
+            "user_errors": user_errors  # Details about failed assignments
         }
-    except HTTPException as e:
-        db.rollback()
-        raise e
+        
+        return response_data
+        
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=f"Error processing CSV: {str(e)}")
+        print(f"Error processing CSV: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Error processing CSV",
+                "error_type": "processing_error",
+                "message": str(e)
+            }
+        )
 
     
     # try:
