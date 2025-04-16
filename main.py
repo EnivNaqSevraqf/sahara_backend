@@ -1256,6 +1256,9 @@ def extract_students(content: str) -> List[dict]:
     Extracts student data from the CSV content.
     Returns a list of dictionaries with student data.
     """
+    # Remove BOM character if present
+    if content.startswith('\ufeff'):
+        content = content[1:]
     reader = csv.DictReader(content.splitlines())
     students = []
     expected_headers = ['RollNo','Name', 'Email']
@@ -1305,31 +1308,85 @@ Notes:
 @app.post("/upload-students")
 async def upload_students(
     file: UploadFile = File(...),
-    token: str = Depends(prof_or_ta_required),  # Updated dependency
+    token: str = Depends(prof_or_ta_required),
     db: Session = Depends(get_db)
 ):
-    # Ensure the file is a CSV
+    # Check file extension first
     if not file.filename.endswith('.csv'):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Only CSV files are allowed"
+        return JSONResponse(
+            status_code=400,
+            content={
+                "detail": "Invalid file format",
+                "error_type": "file_format",
+                "message": "Please upload a CSV file with .csv extension."
+            }
         )
     
     try:
         # Read file content
-        content = await file.read()
-        content_str = content.decode('utf-8')
+        contents = await file.read()
         
-        try:
-            students = extract_students(content_str)
-        except CSVFormatError as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"CSV format error: {str(e)}"
+        # Check if file is empty
+        if len(contents) == 0:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "Empty file",
+                    "error_type": "empty_file",
+                    "message": "The uploaded CSV file is empty. Please upload a file with valid data."
+                }
             )
         
-        created_students = []
-        errors = []
+        text_contents = contents.decode('utf-8')
+        
+        # Check if file only contains whitespace
+        if text_contents.strip() == "":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "Empty file",
+                    "error_type": "empty_file",
+                    "message": "The uploaded CSV file contains no data. Please upload a file with valid content."
+                }
+            )
+        
+        # Parse the CSV
+        try:
+            df = pd.read_csv(StringIO(text_contents))
+            
+            # Check if DataFrame is empty (has no rows)
+            if df.empty:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": "Empty data",
+                        "error_type": "empty_file",
+                        "message": "The CSV file contains headers but no data rows. Please add student data to your file."
+                    }
+                )
+        except Exception as parse_error:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "CSV parsing failed",
+                    "error_type": "csv_parse_error",
+                    "message": f"Unable to parse the CSV file: {str(parse_error)}"
+                }
+            )
+        
+        # Validate required columns in the CSV file
+        required_columns = ['RollNo', 'Name', 'Email']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "Missing required columns",
+                    "error_type": "missing_columns",
+                    "message": f"The CSV file is missing required columns: {', '.join(missing_columns)}",
+                    "missing_columns": missing_columns
+                }
+            )
         
         # Get student role
         student_role = db.query(Role).filter(Role.role == RoleType.STUDENT).first()
@@ -1339,15 +1396,98 @@ async def upload_students(
                 detail="Student role not found"
             )
         
-        # Process each student
-        for student in students:
+        created_students = []
+        errors = []
+        
+        # Process each row in the CSV file
+        for index, row in df.iterrows():
             try:
-                # extract username from email
-                username = student['Email'].split('@')[0]
+                # Check for missing values
+                missing_fields = []
+                for field in required_columns:
+                    if pd.isna(row[field]) or str(row[field]).strip() == '':
+                        missing_fields.append(field)
+                
+                if missing_fields:
+                    errors.append({
+                        "row": index + 2,  # +2 because index is 0-based and we need to account for header row
+                        "rollno": str(row.get('RollNo', 'Unknown')) if not pd.isna(row.get('RollNo', None)) else "Unknown",
+                        "error": f"Missing values for fields: {', '.join(missing_fields)}"
+                    })
+                    continue
+                
+                try:
+                    roll_value = row['RollNo']
+                    # First check if it's empty or NaN
+                    if str(roll_value).strip() == '' or pd.isna(roll_value):
+                        errors.append({
+                            "row": index + 2,
+                            "error": f"Missing roll number"
+                        })
+                        continue
+                        
+                    # Try to convert to integer
+                    try:
+                        rollno = str(int(float(roll_value)))
+                    except (ValueError, TypeError):
+                        errors.append({
+                            "row": index + 2,
+                            "error": "Roll number must be a valid integer"
+                        })
+                        continue
+                except Exception as ve:
+                    errors.append({
+                        "row": index + 2,
+                        "rollno": "Unknown",
+                        "error": f"Error processing roll number: {str(ve)}"
+                    })
+                    continue
+                try:
+                    rollno = str(int(row['RollNo'])) if not pd.isna(row['RollNo']) else None
+                    name = str(row['Name'])
+                    email = str(row['Email'])
+                except ValueError as ve:
+                    errors.append({
+                        "row": index + 2,
+                        "rollno": row.get('RollNo', 'Unknown'),
+                        "error": f"Invalid data format: {str(ve)}"
+                    })
+                    continue
+                # Validate email format (check for @ symbol)
+                if '@' not in email:
+                    errors.append({
+                        "row": index + 2,
+                        "rollno": rollno,
+                        "name": name,
+                        "email": email,
+                        "error": f"Invalid email format: Email must contain '@' symbol"
+                    })
+                    continue
+                # Check if a user with this roll number already exists
+                existing_rollno = db.query(User).filter(User.id == rollno).first()
+                if existing_rollno:
+                    errors.append({
+                        "row": index + 2,
+                        "rollno": rollno,
+                        "name": name,
+                        "email": email,
+                        "error": f"Roll number '{rollno}' already exists in the database"
+                    })
+                    continue
+                # Generate username from email
+                username = email.split('@')[0]
+                
                 # Check if username already exists
                 existing_user = db.query(User).filter(User.username == username).first()
                 if existing_user:
-                    errors.append(f"Username {username} already exists")
+                    errors.append({
+                        "row": index + 2,
+                        "rollno": rollno,
+                        "name": name,
+                        "email": email,
+                        "username": username,
+                        "error": f"Username '{username}' already exists"
+                    })
                     continue
                 
                 # Generate random password
@@ -1355,48 +1495,60 @@ async def upload_students(
                 hashed_password = create_hashed_password(temp_password)
                 
                 # Create new student
-                if 'RollNo' in student:
-                    user_id = student['RollNo']
-                else:
-                    user_id = None
                 new_student = User(
-                    id=user_id,
-                    name=student['Name'],
-                    email=student['Email'],
+                    id=rollno if rollno else None,
+                    name=name,
+                    email=email,
                     username=username,
                     hashed_password=hashed_password,
                     role_id=student_role.id
                 )
                 
-                # Add and commit
                 db.add(new_student)
-                db.commit()
-                db.refresh(new_student)
+                db.flush()  # Get ID without committing
                 
                 # Add to successful creations
                 created_students.append({
-                    "name": new_student.name,
-                    "email": new_student.email,
+                    "row": index + 2,
+                    "name": name,
+                    "email": email,
                     "username": username,
                     "temp_password": temp_password
                 })
                 
             except Exception as e:
-                errors.append(f"Error processing student {student}: {str(e)}")
-        reset_sequence("users", db)
-        return {
-            "message": f"Processed {len(created_students)} students",
-            "created_students": created_students,
-            "errors": errors
-        }
+                errors.append({
+                    "row": index + 2,
+                    "rollno": row.get('RollNo', 'Unknown'),
+                    "error": f"Error processing row: {str(e)}"
+                })
+        
+        # Commit all successful additions
+        if created_students:
+            db.commit()
+            reset_sequence("users", db)
+        else:
+            db.rollback()
+        
+        return JSONResponse(
+            status_code=200,
+            content={
+                "message": f"Processed {len(created_students)} students successfully with {len(errors)} errors",
+                "created_students": created_students,
+                "errors": errors
+            }
+        )
     
     except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error processing CSV file: {str(e)}"
+        db.rollback()
+        return JSONResponse(
+            status_code=500,
+            content={
+                "detail": "Error processing CSV file",
+                "error_type": "processing_error",
+                "message": str(e)
+            }
         )
-
 @app.post("/upload-tas")
 async def upload_tas(
     file: UploadFile = File(...),
