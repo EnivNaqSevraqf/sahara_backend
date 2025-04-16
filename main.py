@@ -1839,94 +1839,115 @@ class AllocationResponse(BaseModel):
 
 
 def get_allocation(n: int, db: Session):
-    # Get all teams and TAs
+    # Get all teams and TAs (make sure the TA filter is consistent with your schema)
     teams = db.query(Team).all()
     tas = db.query(User).filter(User.role_id == 3).all()
     
     if not tas:
         raise HTTPException(status_code=400, detail="No TAs available")
     
-    # Calculate maximum teams per TA
-    max_teams_per_ta = (len(teams) * n) // len(tas)
-    if (len(teams)*n)>len(tas)*max_teams_per_ta:
-        max_teams_per_ta = 1 + max_teams_per_ta
-    if max_teams_per_ta == 0:
-        max_teams_per_ta = 1
+    # Pre-fetch team skills and TA skills in two queries
+    team_ids = [team.id for team in teams]
+    ta_ids = [ta.id for ta in tas]
     
-    # Dictionary to track number of teams assigned to each TA
-    ta_assignments = {ta.id: 0 for ta in tas}
-    allocations = []
+    # Get all team skills at once
+    team_skill_rows = db.query(TeamSkill).filter(TeamSkill.team_id.in_(team_ids)).all()
+    # Get all TA skills at once
+    ta_skill_rows = db.query(UserSkill).filter(UserSkill.user_id.in_(ta_ids)).all()
+    
+    # Build mapping: team_id -> set(skill_ids)
+    team_skills_map = {}
+    for row in team_skill_rows:
+        team_skills_map.setdefault(row.team_id, set()).add(row.skill_id)
+    
+    # Build mapping: ta_id -> set(skill_ids)
+    ta_skills_map = {}
+    for row in ta_skill_rows:
+        ta_skills_map.setdefault(row.user_id, set()).add(row.skill_id)
+    
+    # Prepare list of potential matches based on skill intersection
     all_matches = []
-
-    # Calculate skill matches for all team-TA pairs
     for team in teams:
-        # Get team's required skills
-        team_skills = set([skill[0] for skill in db.query(TeamSkill.skill_id)
-            .filter(TeamSkill.team_id == team.id).all()])
-        
+        team_skill_set = team_skills_map.get(team.id, set())
         for ta in tas:
-            # Get TA's skills
-            ta_skills = set([skill[0] for skill in db.query(UserSkill.skill_id)
-                .filter(UserSkill.user_id == ta.id).all()])
-            
-            # Calculate skill match score
-            match_score = len(team_skills.intersection(ta_skills))
-            
-            if match_score > 0:  # Only consider pairs with at least one skill match
+            ta_skill_set = ta_skills_map.get(ta.id, set())
+            match_score = len(team_skill_set.intersection(ta_skill_set))
+            if match_score > 0:  # only add if there's at least one matching skill
                 all_matches.append({
                     "team_id": team.id,
                     "ta_id": ta.id,
                     "match_score": match_score
                 })
-
+    
     # Sort matches by match score in descending order
     all_matches.sort(key=lambda x: x["match_score"], reverse=True)
+    
+    # Calculate a rough cap on how many teams a TA can be assigned to
+    max_teams_per_ta = (len(teams) * n) // len(tas)
+    if (len(teams) * n) > (len(tas) * max_teams_per_ta):
+        max_teams_per_ta += 1
+    if max_teams_per_ta == 0:
+        max_teams_per_ta = 1
 
-    # Create initial allocations based on best matches
+    # Dictionary to track number of teams assigned per TA
+    ta_assignments = {ta.id: 0 for ta in tas}
     team_allocations = {team.id: [] for team in teams}
 
-    # First pass: Assign TAs based on best skill matches
+    # First pass: assign best-matching TAs to teams
     for match in all_matches:
         team_id = match["team_id"]
         ta_id = match["ta_id"]
-
-        # Check if team needs more TAs and TA hasn't reached their limit
-        if (len(team_allocations[team_id]) < n and 
-            ta_assignments[ta_id] < max_teams_per_ta):
+        if (len(team_allocations[team_id]) < n and
+            ta_assignments[ta_id] < max_teams_per_ta and
+            ta_id not in team_allocations[team_id]):
             team_allocations[team_id].append(ta_id)
             ta_assignments[ta_id] += 1
 
-    # Second pass: Fill remaining slots if needed
+    # Second pass: fill remaining slots if needed using TAs with fewer assignments
     for team_id, assigned_tas in team_allocations.items():
         while len(assigned_tas) < n:
-            # Find TA with fewest assignments who isn't already assigned to this team
+            # Pick a TA that is not already assigned and has the fewest assignments
             available_ta = min(
                 (ta_id for ta_id in ta_assignments if ta_id not in assigned_tas),
                 key=lambda x: ta_assignments[x],
                 default=None
             )
-            
             if available_ta and ta_assignments[available_ta] < max_teams_per_ta:
                 assigned_tas.append(available_ta)
                 ta_assignments[available_ta] += 1
             else:
-                break  # No more available TAs
-
-    # Format the allocations
+                break  # no available TA found
+    
+    # Format allocations for each team
+    allocations = []
     for team_id, assigned_tas in team_allocations.items():
         allocations.append({
             "team_id": team_id,
             "assigned_ta_ids": assigned_tas
         })
-
+    
     return allocations
 
+# Update the /match/{n} endpoint to count TAs properly
 @app.get("/match/{n}", response_model=dict)
 async def create_match(n: int, db: Session = Depends(get_db)):
     if n <= 0:
-        raise HTTPException(status_code=400, detail="Number of TAs per team must be positive")
+        raise HTTPException(
+            status_code=400, 
+            detail="Number of TAs per team must be positive"
+        )
     
     try:
+        # Get total number of TAs using a join (this ensures we compare the actual enum)
+        total_tas = db.query(User).join(Role).filter(Role.role == RoleType.TA).count()
+        
+        # Validate if n exceeds total TAs
+        if n > total_tas:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Number of TAs per team ({n}) exceeds the total number of available TAs ({total_tas}). Please enter a value less than or equal to {total_tas}."
+            )
+        
         # Get allocations using matching algorithm
         allocations = get_allocation(n, db)
         
@@ -1944,11 +1965,17 @@ async def create_match(n: int, db: Session = Depends(get_db)):
                 db.add(new_team_ta)
         
         db.commit()
-        return {"message": "allocation is done"}
+        return {"message": "TA allocation completed successfully"}
     
+    except HTTPException as he:
+        db.rollback()
+        raise he
     except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500, 
+            detail=f"Failed to allocate TAs: {str(e)}"
+        )
 
 @app.get("/match", response_model=dict)
 async def get_match(db: Session = Depends(get_db)):
