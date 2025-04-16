@@ -1567,7 +1567,9 @@ async def upload_tas(
         # Read file content
         content = await file.read()
         content_str = content.decode('utf-8')
-        
+        if content_str.startswith('\ufeff'):
+            content_str = content_str[1:]
+            print("BOM detected and removed from CSV")
         # Print the first few lines for debugging
         print(f"CSV Content (first 100 chars): {content_str[:100]}")
         
