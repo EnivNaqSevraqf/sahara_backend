@@ -1980,46 +1980,61 @@ async def create_match(n: int, db: Session = Depends(get_db)):
 @app.get("/match", response_model=dict)
 async def get_match(db: Session = Depends(get_db)):
     try:
-        # Get all teams with their skills and TAs
         teams = db.query(Team).all()
         results = []
-        
         for team in teams:
-            # Get team skills
-            skills = db.query(Skill).join(team_skills).filter(team_skills.c.team_id == team.id).all()
+            # Get required skills for the team
+            team_skills_q = db.query(Skill).join(team_skills).filter(team_skills.c.team_id == team.id).all()
+            required_skills = [
+                {
+                    "id": skill.id,
+                    "name": skill.name,
+                    "bgColor": skill.bgColor,
+                    "color": skill.color,
+                    "icon": skill.icon
+                }
+                for skill in team_skills_q
+            ]
+            team_required_skill_names = {skill["name"] for skill in required_skills}
             
-            # Get assigned TAs
-            tas = (
+            # Get assigned TAs for the team using the association table Team_TA
+            tas_q = (
                 db.query(User)
                 .join(Team_TA, User.id == Team_TA.ta_id)
                 .filter(Team_TA.team_id == team.id)
                 .all()
             )
+            ta_list = []
+            combined_ta_skills_set = set()
+            for ta in tas_q:
+                # Ensure the TA's skills are loaded (lazy-load if needed)
+                ta_skill_names = {skill.name for skill in ta.skills} if ta.skills else set()
+                combined_ta_skills_set.update(ta_skill_names)
+                ta_list.append({
+                    "id": ta.id,
+                    "name": ta.name,
+                    "skills": list(ta_skill_names)
+                })
+            
+            # Calculate skill match percentage:
+            if team_required_skill_names:
+                match_percentage = round(
+                    len(team_required_skill_names.intersection(combined_ta_skills_set)) /
+                    len(team_required_skill_names) * 100
+                )
+            else:
+                match_percentage = 0
             
             results.append({
                 "team_id": team.id,
                 "team_name": team.name,
-                "skills": [
-                    {
-                        "id": skill.id,
-                        "name": skill.name,
-                        "bgColor": skill.bgColor,
-                        "color": skill.color,
-                        "icon": skill.icon
-                    }
-                    for skill in skills
-                ],
-                "tas": [
-                    {
-                        "id": ta.id,
-                        "name": ta.name
-                    }
-                    for ta in tas
-                ]
+                "skills": required_skills,         # required skills from team
+                "tas": ta_list,                    # assigned TAs with their individual skills
+                "combined_ta_skills": list(combined_ta_skills_set),
+                "skill_match": match_percentage
             })
-        
+            
         return {"teams": results}
-    
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
